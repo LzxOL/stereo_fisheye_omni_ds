@@ -282,5 +282,3 @@ class StereoDataset(Dataset):
 
     def makeVisImage(self, *args, **kwargs):
         raise NotImplementedError('The original four-view panorama visualizer does not apply to stereo')
-
-
