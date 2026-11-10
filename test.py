@@ -11,13 +11,13 @@ from argparse import ArgumentParser
 
 import torch
 import torch.nn as nn
-import wandb
+# CNN-ONLY: wandb is imported only when requested.
 
 # Internal modules
 from dataset import Dataset, MultiDataset
 from utils.common import *
 from utils.image import *
-from module.network import OmniDS
+# CNN-ONLY: delay network imports until the mode is known.
 
 
 def set_reproducibility(seed: int, deterministic: bool = False):
@@ -49,6 +49,7 @@ def set_reproducibility(seed: int, deterministic: bool = False):
 # Arguments
 # -------------------------------------------------------------
 parser = ArgumentParser(description='Evaluation for OmniDS')
+parser.add_argument('--cnn_only', action='store_true', help='use CNN-only dynamic context, without DINO')
 
 parser.add_argument('--ckpt', required=True, help='checkpoint path to evaluate')
 parser.add_argument('--name', default='ROmniStereo_BEV_eval', help='wandb run name')
@@ -135,6 +136,15 @@ parser.add_argument('--wdecay', type=float, default=.00001, help="Weight decay i
 
 args = parser.parse_args()
 
+if args.cnn_only:
+    if args.distilled:
+        parser.error('--cnn_only cannot be combined with --distilled')
+    from module_cnn_only.network import OmniDS
+else:
+    from module.network import OmniDS
+if args.wandb:
+    import wandb
+
 
 # -------------------------------------------------------------
 # Options (train.py와 동일한 구조)
@@ -155,6 +165,7 @@ opts.data_opts.num_downsample = args.num_downsample
 opts.data_opts.use_rgb = args.use_rgb
 
 opts.net_opts = Edict()
+opts.net_opts.cnn_only = args.cnn_only
 opts.net_opts.base_channel = args.base_channel
 opts.net_opts.num_invdepth = opts.data_opts.num_invdepth
 opts.net_opts.use_rgb = opts.data_opts.use_rgb
@@ -210,6 +221,22 @@ opts.wdecay = args.wdecay
 def main():
     set_reproducibility(args.seed, args.deterministic)
 
+    snapshot = None
+    if args.cnn_only:
+        # CNN-ONLY: the author train/test defaults differ (GEV levels 2 versus 4).
+        # Restore architecture and sweep geometry together instead of silently mixing them.
+        assert os.path.exists(args.ckpt), f"Checkpoint not found: {args.ckpt}"
+        snapshot = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        if not snapshot.get('net_opts', {}).get('cnn_only', False):
+            raise ValueError('Pass a CNN-only checkpoint; original DINO checkpoints are incompatible')
+        opts.net_opts.update(snapshot['net_opts'])
+        opts.net_opts.mixed_precision = args.mixed_precision
+        opts.net_opts.use_triton = args.triton
+        for key in ('num_invdepth', 'num_downsample', 'use_rgb', 'phi_deg'):
+            opts.data_opts[key] = opts.net_opts[key]
+        opts.data_opts.equirect_size = [opts.net_opts.equi_h, opts.net_opts.equi_w]
+        LOG_INFO('CNN-only architecture and sweep options restored from checkpoint net_opts')
+
     # Dataset
     if len(opts.dbname) > 1:
         data = MultiDataset(opts.dbname, opts.data_opts, db_root=opts.db_root)
@@ -217,7 +244,8 @@ def main():
         data = Dataset(opts.dbname[0], opts.data_opts, db_root=opts.db_root)
 
     # Network (v3 or v5)
-    LOG_INFO("Using OmniDS (DINO context + separate GEV)")
+    LOG_INFO("Using module_cnn_only.network.OmniDS (dynamic CNN context + GEV)" if args.cnn_only
+             else "Using OmniDS (DINO context + separate GEV)")
     net = OmniDS(opts.net_opts)
 
     net = nn.DataParallel(net).cuda()
@@ -225,7 +253,8 @@ def main():
 
     # Load checkpoint
     assert os.path.exists(args.ckpt), f"Checkpoint not found: {args.ckpt}"
-    snapshot = torch.load(args.ckpt, map_location="cpu")
+    if snapshot is None:
+        snapshot = torch.load(args.ckpt, map_location="cpu")
     net.load_state_dict(snapshot['net_state_dict'])
     LOG_INFO(f"Loaded checkpoint: {args.ckpt}")
 

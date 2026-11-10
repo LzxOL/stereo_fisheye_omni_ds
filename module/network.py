@@ -835,7 +835,7 @@ class OmniDS(nn.Module):
                 sim_sph = spherical_sweep(cnn_feats, grids_tensor)
             del cnn_feats
 
-            # 4. Build similarity profile AND get ref/tgt/cam_vols for GEV
+            # 4. 类PDF-OMni 操作；得到 Reference Volume、Target Volume、similarity_profile(Reference × Target：通道点积相关性 -> 2D Spatial Aggregation)
             similarity_profile, ref, tgt, cam_vols = \
                 self.similarity_context.build_profile(
                     grids=grids_tensor, spherical_volumes=sim_sph,
@@ -843,7 +843,7 @@ class OmniDS(nn.Module):
                     use_triton=self.opts.get('use_triton', False),
                 )
 
-            # 5. Build independent GEV from ref/tgt volumes
+            # 5. Build independent GEV from ref/tgt volumes  计算 GWC + Feature Variance
             self.gev_module.build(ref, tgt, cam_vols,
                                   use_triton=self.opts.get('use_triton', False))
             del ref, tgt, cam_vols, sim_sph
@@ -855,7 +855,7 @@ class OmniDS(nn.Module):
                                     dtype=cnn_feats_stacked.dtype)
         inv_depth_idx = inv_depth_idx + D_grid / 2
 
-        # Initial context (DINO+CNN fusion at initial depth)
+        # Initial context (DINO+CNN fusion at initial depth) 计算四路鱼眼相机中的采样参考位置
         reference_points = self.compute_reference_points_from_grids(
             grids_tensor, inv_depth_idx
         )

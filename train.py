@@ -5,7 +5,7 @@ from __future__ import print_function, division
 
 import time
 from argparse import ArgumentParser
-import wandb
+# CNN-ONLY: wandb is optional; import it only when logging is requested.
 
 # Torch libs
 import torch
@@ -36,14 +36,14 @@ except:
 from dataset import Dataset, MultiDataset
 from utils.common import *
 from utils.image import *
-from module.network import OmniDS
-from module.loss_functions import sequence_loss
+# CNN-ONLY: select the network after argument parsing, before importing DINO dependencies.
 
 # Initialize
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.benchmark = True
 
 parser = ArgumentParser(description='Training for OmniDS')
+parser.add_argument('--cnn_only', action='store_true', help='use CNN-only dynamic context, without DINO')
 
 parser.add_argument('--name', default='ROmniStereo_BEV', help="name of your experiment")
 parser.add_argument('--restore_ckpt', help="restore checkpoint")
@@ -134,6 +134,19 @@ parser.add_argument('--wandb', action='store_true', help='log training to wandb'
     
 args = parser.parse_args()
 
+if args.cnn_only:
+    if args.distilled or args.use_dino_sim:
+        parser.error('--cnn_only cannot be combined with --distilled or --use_dino_sim')
+    from module_cnn_only.network import OmniDS
+    from module_cnn_only.loss_functions import sequence_loss
+    if args.name == parser.get_default('name'):
+        args.name = 'OmniDS_CNN_only'
+else:
+    from module.network import OmniDS
+    from module.loss_functions import sequence_loss
+if args.wandb:
+    import wandb
+
 opts = Edict()
 # Dataset & sweep arguments
 opts.name = args.name
@@ -152,6 +165,7 @@ opts.data_opts.num_downsample = args.num_downsample
 opts.data_opts.use_rgb = args.use_rgb
 
 opts.net_opts = Edict()
+opts.net_opts.cnn_only = args.cnn_only
 opts.net_opts.base_channel = args.base_channel
 opts.net_opts.num_invdepth = opts.data_opts.num_invdepth
 opts.net_opts.use_rgb = opts.data_opts.use_rgb
@@ -227,8 +241,10 @@ def train(epoch_total, load_state):
                                            num_workers=0, drop_last=True)
     total_num_steps = len(data)*opts.total_epochs//opts.batch_size
 
-    LOG_INFO("Using OmniDS (DINO context + separate GEV)")
-    LOG_INFO(f"  DINO model: {opts.net_opts.dino_model}, freeze: {opts.net_opts.freeze_dino}")
+    LOG_INFO("Using module_cnn_only.network.OmniDS (dynamic CNN context + GEV)" if args.cnn_only
+             else "Using OmniDS (DINO context + separate GEV)")
+    if not args.cnn_only:
+        LOG_INFO(f"  DINO model: {opts.net_opts.dino_model}, freeze: {opts.net_opts.freeze_dino}")
     LOG_INFO(f"  GEV groups: {opts.net_opts.gev_num_groups}, reg_channels: {opts.net_opts.gev_reg_channels}")
     LOG_INFO(f"  GEV pyramid: {opts.net_opts.gev_num_pyramid_levels} levels, radius {opts.net_opts.gev_radius}")
     net = nn.DataParallel(OmniDS(opts.net_opts)).cuda()
@@ -249,7 +265,10 @@ def train(epoch_total, load_state):
 
     if load_state:
         if opts.snapshot_path and osp.exists(opts.snapshot_path):
-            snapshot = torch.load(opts.snapshot_path)
+            snapshot = (torch.load(opts.snapshot_path, weights_only=False) if args.cnn_only
+                        else torch.load(opts.snapshot_path))
+            if args.cnn_only and not snapshot.get('net_opts', {}).get('cnn_only', False):
+                raise ValueError('CNN-only requires a CNN-only checkpoint; original DINO checkpoints are incompatible')
             if 'net_state_dict' in snapshot.keys():
                 net.load_state_dict(snapshot['net_state_dict'])
                 LOG_INFO('checkpoint %s is loaded' % (opts.snapshot_path))
@@ -265,7 +284,10 @@ def train(epoch_total, load_state):
             sys.exit('%s do not exsits' % (opts.snapshot_path))
 
         if opts.pretrain_path and osp.exists(opts.pretrain_path):
-            snapshot = torch.load(opts.pretrain_path)
+            snapshot = (torch.load(opts.pretrain_path, weights_only=False) if args.cnn_only
+                        else torch.load(opts.pretrain_path))
+            if args.cnn_only and not snapshot.get('net_opts', {}).get('cnn_only', False):
+                raise ValueError('CNN-only requires a CNN-only checkpoint; original DINO checkpoints are incompatible')
             if 'net_state_dict' in snapshot.keys():
                 net.load_state_dict(snapshot['net_state_dict'])
                 LOG_INFO('checkpoint %s is loaded' % (opts.pretrain_path))
@@ -298,7 +320,10 @@ def train(epoch_total, load_state):
             optimizer.zero_grad()
             # Pass ocams for principal point bias (if available)
             ocams = getattr(data, 'ocams', None)
-            predictions = net.module.forward(imgs, grids, ocams=ocams)
+            if args.cnn_only:
+                predictions = net.module.forward(imgs, grids, iters=opts.train_iters, ocams=ocams)
+            else:
+                predictions = net.module.forward(imgs, grids, ocams=ocams)
 
             loss = sequence_loss(predictions, gt.unsqueeze(1), valid.unsqueeze(1))
             
@@ -368,7 +393,10 @@ def train(epoch_total, load_state):
                 # Pass ocams for LoRA adaptation (same as training)
                 ocams = getattr(data, 'ocams', None)
                 with torch.no_grad():
-                    invdepth_idx = net_eval(imgs, grids, test_mode=True)
+                    if args.cnn_only:
+                        invdepth_idx = net_eval(imgs, grids, test_mode=True, iters=opts.train_iters)
+                    else:
+                        invdepth_idx = net_eval(imgs, grids, test_mode=True)
 
                 invdepth_idx = toNumpy(invdepth_idx[0, 0])
 

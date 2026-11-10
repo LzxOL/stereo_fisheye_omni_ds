@@ -1,0 +1,482 @@
+{
+  "small_cpu": {
+    "device": "cpu",
+    "real_sample": false,
+    "input": [
+      [
+        1,
+        1,
+        64,
+        80
+      ],
+      [
+        1,
+        1,
+        64,
+        80
+      ]
+    ],
+    "grids": [
+      [
+        16,
+        24,
+        16,
+        2
+      ],
+      [
+        16,
+        24,
+        16,
+        2
+      ]
+    ],
+    "shapes": {
+      "cnn": [
+        [
+          1,
+          32,
+          32,
+          40
+        ],
+        [
+          1,
+          32,
+          32,
+          40
+        ]
+      ],
+      "profile": [
+        1,
+        16,
+        16,
+        24
+      ],
+      "gev_before_spatial_upsample": [
+        1,
+        1,
+        16,
+        8,
+        12
+      ],
+      "context": [
+        1,
+        32,
+        16,
+        24
+      ],
+      "hidden_init": [
+        1,
+        64,
+        16,
+        24
+      ],
+      "similarity_lookup": [
+        1,
+        36,
+        16,
+        24
+      ],
+      "gev_lookup": [
+        1,
+        18,
+        16,
+        24
+      ],
+      "recurrent_hidden": [
+        1,
+        64,
+        16,
+        24
+      ],
+      "gru_input": [
+        1,
+        160,
+        16,
+        24
+      ],
+      "delta_index": [
+        1,
+        1,
+        16,
+        24
+      ],
+      "up_mask": [
+        1,
+        36,
+        16,
+        24
+      ]
+    },
+    "calls": {
+      "cnn": 1,
+      "profile": 1,
+      "gev_before_spatial_upsample": 1,
+      "context": 3,
+      "hidden_init": 1,
+      "similarity_lookup": 3,
+      "gev_lookup": 3,
+      "recurrent_hidden": 3,
+      "gru_input": 3,
+      "delta_index": 3,
+      "up_mask": 3
+    },
+    "predictions": [
+      [
+        1,
+        1,
+        32,
+        48
+      ],
+      [
+        1,
+        1,
+        32,
+        48
+      ],
+      [
+        1,
+        1,
+        32,
+        48
+      ]
+    ],
+    "loss": 5.80742073059082,
+    "gradient_l1": {
+      "cnn": 193.06729400261293,
+      "context": 0.8567184040530265,
+      "state": 1.9499906088603893,
+      "view_weights": 0.18666761968052015,
+      "similarity": 0.686525220022304,
+      "gev": 19.36703528088401,
+      "gru": 688.0677129523829,
+      "depth_head": 654.973844408989,
+      "upsample_mask": 0.3438272774219513
+    },
+    "optimizer_update": true,
+    "checkpoint_reload": true,
+    "forbidden_imports": [],
+    "num_cams": 2,
+    "iterations": 3,
+    "input_gradient_l1": [
+      0.5791371464729309,
+      0.31901994347572327
+    ],
+    "mask_checks": {
+      "left_fallback": true,
+      "zero_context": true,
+      "constant_index_upsampling": true,
+      "invalid_lookup": true,
+      "partial_forward_backward": true,
+      "all_invalid_forward_backward": true,
+      "nonfinite_grid_forward_backward": true
+    },
+    "index_ranges": [
+      [
+        8.0,
+        8.0
+      ],
+      [
+        0.0,
+        8.077357292175293
+      ],
+      [
+        0.0,
+        8.140968322753906
+      ]
+    ],
+    "training_seconds": 0.2708525559864938,
+    "peak_allocated_mib": null
+  },
+  "full_cuda_amp": {
+    "device": "cuda",
+    "real_sample": true,
+    "input": [
+      [
+        1,
+        1,
+        768,
+        800
+      ],
+      [
+        1,
+        1,
+        768,
+        800
+      ]
+    ],
+    "grids": [
+      [
+        160,
+        240,
+        96,
+        2
+      ],
+      [
+        160,
+        240,
+        96,
+        2
+      ]
+    ],
+    "shapes": {
+      "cnn": [
+        [
+          1,
+          32,
+          384,
+          400
+        ],
+        [
+          1,
+          32,
+          384,
+          400
+        ]
+      ],
+      "profile": [
+        1,
+        96,
+        160,
+        240
+      ],
+      "gev_before_spatial_upsample": [
+        1,
+        1,
+        96,
+        80,
+        120
+      ],
+      "context": [
+        1,
+        32,
+        160,
+        240
+      ],
+      "hidden_init": [
+        1,
+        64,
+        160,
+        240
+      ],
+      "similarity_lookup": [
+        1,
+        36,
+        160,
+        240
+      ],
+      "gev_lookup": [
+        1,
+        18,
+        160,
+        240
+      ],
+      "recurrent_hidden": [
+        1,
+        64,
+        160,
+        240
+      ],
+      "gru_input": [
+        1,
+        160,
+        160,
+        240
+      ],
+      "delta_index": [
+        1,
+        1,
+        160,
+        240
+      ],
+      "up_mask": [
+        1,
+        36,
+        160,
+        240
+      ]
+    },
+    "calls": {
+      "cnn": 1,
+      "profile": 1,
+      "gev_before_spatial_upsample": 1,
+      "context": 12,
+      "hidden_init": 1,
+      "similarity_lookup": 12,
+      "gev_lookup": 12,
+      "recurrent_hidden": 12,
+      "gru_input": 12,
+      "delta_index": 12,
+      "up_mask": 12
+    },
+    "predictions": [
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ],
+      [
+        1,
+        1,
+        320,
+        480
+      ]
+    ],
+    "loss": 122.78712463378906,
+    "gradient_l1": {
+      "cnn": 524.0816613426432,
+      "context": 2.5881162052974105,
+      "state": 8.086689746472985,
+      "view_weights": 1.0771480249240994,
+      "similarity": 2.8740873301794636,
+      "gev": 13.653963525721338,
+      "gru": 8419.028010815382,
+      "depth_head": 6697.831996917725,
+      "upsample_mask": 2.8671582834795117
+    },
+    "optimizer_update": true,
+    "checkpoint_reload": true,
+    "forbidden_imports": [],
+    "num_cams": 2,
+    "iterations": 12,
+    "input_gradient_l1": [
+      210.86032104492188,
+      124.47584533691406
+    ],
+    "mask_checks": {},
+    "index_ranges": [
+      [
+        48.0,
+        48.0
+      ],
+      [
+        0.0,
+        48.21875
+      ],
+      [
+        0.0,
+        48.4375
+      ],
+      [
+        0.0,
+        48.65625
+      ],
+      [
+        0.0,
+        48.875
+      ],
+      [
+        0.0,
+        49.09375
+      ],
+      [
+        0.0,
+        49.3125
+      ],
+      [
+        0.0,
+        49.53125
+      ],
+      [
+        0.0,
+        49.75
+      ],
+      [
+        0.0,
+        49.96875
+      ],
+      [
+        0.0,
+        50.1875
+      ],
+      [
+        0.0,
+        50.40625
+      ]
+    ],
+    "training_seconds": 2.2760823192074895,
+    "peak_allocated_mib": 6076.90234375
+  },
+  "four_camera_regression": {
+    "four_camera_output_exact": true,
+    "four_camera_gradients_exact": true,
+    "four_camera_inference_exact": true,
+    "strict_previous_weights_load": true
+  },
+  "interfaces": {
+    "batch2_rgb_forward_backward": true,
+    "rejections": {
+      "camera_count": true,
+      "triton": true,
+      "candidate_axis": true,
+      "missing_mask": true,
+      "mask_dtype": true,
+      "mask_shape": true,
+      "grid_shape": true,
+      "left_depth_invariance": true
+    }
+  },
+  "protected_files_unchanged": true,
+  "scope": "Network only; stereo losses use synthetic candidate-index targets, not Rig-centred GT",
+  "gpu": "NVIDIA RTX 5090, physical GPU 1, batch size 1"
+}

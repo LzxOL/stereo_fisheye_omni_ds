@@ -238,24 +238,26 @@ class GEVModule(nn.Module):
             B, C, H, W, Ds = camera_volumes[0].shape
             G = self.num_groups
             cpg = C // G
+            # 将4路语言的volume拼接然后分组，计算方差取平均
             stacked = torch.stack(list(camera_volumes), dim=0)
             stacked = stacked.view(4, B, G, cpg, H, W, Ds)
             group_var = stacked.var(dim=0).mean(dim=2)
 
         # 3. Concat → permute to [B, 2G, Ds, H, W]
-        vol = torch.cat([gwc, group_var], dim=1)              # [B, 2G, H, W, Ds]
+        vol  = torch.cat([gwc, group_var], dim=1)              # [B, 2G, H, W, Ds]
         vol = vol.permute(0, 1, 4, 2, 3).contiguous()        # [B, 2G, Ds, H, W]
 
-        # 4. Optional spatial downsample
+        # 4. Optional spatial downsample （H、W下采样2倍）
         if self.use_spatial_downsample:
             vol = F.avg_pool3d(vol, kernel_size=(1, 2, 2), stride=(1, 2, 2))
 
         # 5. Guide features from ref (averaged over depth)
-        ref_2d = ref.mean(dim=-1)  # [B, C, H, W]
+        ref_2d = ref.mean(dim=-1)  # [B, C, H, W] 取平均
         if self.use_spatial_downsample:
             ref_2d = F.avg_pool2d(ref_2d, kernel_size=2, stride=2)
 
         guide_features = []
+        # 生成多尺度的 引导特征
         for i, proj in enumerate(self.guide_projs):
             g = proj(ref_2d)
             if i > 0:
