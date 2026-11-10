@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 import sys
 import time
+from contextlib import nullcontext
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -135,6 +137,28 @@ def stereo_mask_checks(model, imgs, grids, candidate, iterations):
     assert all(torch.isfinite(p).all() and not p[..., 2*y[0]:2*y[0]+2, 2*x[0]:2*x[0]+2].any() for p in bad_output)
     sum(p.mean() for p in bad_output).backward()
     assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+    if not model.opts.use_dynamic_context:
+        # Static context has its own left visibility, even where no stereo match exists.
+        was_training = model.training
+        model.eval()
+        captured = []
+        hook = model.update_block.register_forward_pre_hook(lambda m, i: captured.append(i[2].detach().clone()))
+        with torch.no_grad():
+            left = model.encoder(imgs)[0]
+            grid = grids[0][:, :, 0][None].expand(b, -1, -1, -1)
+            visible = (torch.isfinite(grid).all(-1) & (grid.abs() <= 1).all(-1))[:, None]
+            sampled_left = F.grid_sample(left, grid, align_corners=True)
+            expected = torch.relu(model.context_proj(torch.where(visible, sampled_left, 0.)))
+            expected = torch.where(visible, expected, 0.)
+            model(imgs, grids, iters=2, valid_mask=empty)
+            torch.testing.assert_close(captured[0], expected)
+            assert expected.abs().sum() > 0
+            captured.clear()
+            model(imgs, grids, iters=2, valid_mask=candidate,
+                  left_valid_mask=torch.zeros_like(index, dtype=torch.bool))
+            assert all(not context.any() for context in captured)
+        hook.remove()
+        model.train(was_training)
     return dict(left_fallback=True, zero_context=True, constant_index_upsampling=True,
                 invalid_lookup=True, partial_forward_backward=True, all_invalid_forward_backward=True,
                 nonfinite_grid_forward_backward=True)
@@ -147,6 +171,8 @@ def main():
     parser.add_argument('--real_sample', action='store_true')
     parser.add_argument('--mixed_precision', action='store_true')
     parser.add_argument('--num_cams', type=int, choices=[2, 4], default=4)
+    parser.add_argument('--use_group_variance', action='store_true')
+    parser.add_argument('--use_dynamic_context', action='store_true')
     parser.add_argument('--full_size', action='store_true', help='stereo D/H/W=96/160/240, images 768x800')
     parser.add_argument('--num_invdepth', type=int)
     parser.add_argument('--iters', type=int, default=3)
@@ -168,7 +194,9 @@ def main():
                    use_rgb=False, phi_deg=45., num_cams=args.num_cams,
                    num_depth_samples=args.num_invdepth if stereo else args.num_invdepth // 2,
                    sim_levels=4, gev_num_pyramid_levels=2, gev_radius=4,
-                   mixed_precision=args.mixed_precision, cnn_only=True)
+                   mixed_precision=args.mixed_precision, cnn_only=True,
+                   use_group_variance=(not stereo or args.use_group_variance),
+                   use_dynamic_context=(not stereo or args.use_dynamic_context))
     # No fabricated grids and no new LUT cache in the dataset: use the exact author geometry.
     data_options = Edict(options)
     if stereo:
@@ -210,6 +238,7 @@ def main():
     assert not hasattr(model, 'dino_extractor') and not hasattr(model, 'context_fuser')
     shapes, counts, hooks = {}, {}, []
     index_ranges = []
+    contexts, hidden_states = [], []
 
     def record(name, value):
         counts[name] = counts.get(name, 0) + 1
@@ -226,13 +255,25 @@ def main():
     def record_gru(module, inputs):
         record('recurrent_hidden', inputs[0])
         record('gru_input', inputs[1])
+        hidden_states.append(inputs[0].detach().clone())
 
     hooks.append(model.update_block.gru.register_forward_pre_hook(record_gru))
     hooks.append(model.update_block.encoder.conv_depth1.register_forward_pre_hook(
         lambda m, i: index_ranges.append([float(i[0].detach().min()), float(i[0].detach().max())])))
 
+    def record_context(module, inputs):
+        contexts.append(inputs[2].detach().clone())
+
+    hooks.append(model.update_block.register_forward_pre_hook(record_context))
+    hooks.append(model.gev_module.regularization.register_forward_pre_hook(
+        lambda m, i: record('gev_input', i[0])))
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-5, eps=1e-8)
-    predictions = model(imgs, grids, iters=args.iters, valid_mask=candidate)
+    # Prove GWC-only does not execute Python's original Tensor.var branch.
+    guard = patch.object(torch.Tensor, 'var', side_effect=AssertionError('Variance executed')) if not model.opts.use_group_variance else nullcontext()
+    context_guard = patch.object(model, '_sample_cnn_erp', side_effect=AssertionError('Dynamic context executed')) if not model.opts.use_dynamic_context else nullcontext()
+    with guard, context_guard:
+        predictions = model(imgs, grids, iters=args.iters, valid_mask=candidate)
     assert len(predictions) == args.iters
     assert all(list(p.shape) == [1, 1, *size] and torch.isfinite(p).all() for p in predictions)
     loss = sequence_loss(predictions, gt, valid)
@@ -245,11 +286,19 @@ def main():
                         ('gev', model.gev_module), ('gru', model.update_block.gru),
                         ('depth_head', model.update_block.depth_head), ('upsample_mask', model.update_block.mask)]:
         grads = [p.grad for p in layer.parameters() if p.grad is not None]
+        if name == 'view_weights' and not model.opts.use_dynamic_context:
+            assert not grads
+            continue
         assert grads and all(torch.isfinite(g).all() for g in grads), name
         gradients[name] = sum(float(g.abs().sum()) for g in grads)
         assert gradients[name] > 0, name
     assert counts['cnn'] == counts['hidden_init'] == counts['profile'] == counts['gev_before_spatial_upsample'] == 1
-    assert counts['context'] == args.iters  # Dynamic refresh, not fixed context.
+    assert counts['context'] == (args.iters if model.opts.use_dynamic_context else 1)
+    assert shapes['gev_input'][1] == (16 if model.opts.use_group_variance else 8)
+    if not model.opts.use_dynamic_context:
+        assert all(torch.equal(contexts[0], c) for c in contexts)
+    assert not torch.equal(hidden_states[0], hidden_states[-1])
+    assert index_ranges[0] != index_ranges[-1]
     image_gradients = [float(img.grad.abs().sum()) for img in imgs] if stereo else []
     if stereo:
         assert all(torch.isfinite(img.grad).all() and img.grad.abs().sum() > 0 for img in imgs)
@@ -270,8 +319,8 @@ def main():
     checkpoint = Path(args.output).with_suffix('.pth')
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     torch.save({'net_state_dict': model.state_dict(), 'net_opts': model.opts}, checkpoint)
-    restored = OmniDS(options).to(args.device).eval()
     saved = torch.load(checkpoint, map_location=args.device, weights_only=False)
+    restored = OmniDS(saved["net_opts"]).to(args.device).eval()
     restored.load_state_dict(saved['net_state_dict'])
     with torch.no_grad():
         result = restored(imgs, grids, iters=args.iters, test_mode=True, valid_mask=candidate)
@@ -287,6 +336,10 @@ def main():
                   forbidden_imports=forbidden, num_cams=args.num_cams, iterations=args.iters,
                   input_gradient_l1=image_gradients, mask_checks=mask_checks,
                   index_ranges=index_ranges,
+                  use_group_variance=model.opts.use_group_variance,
+                  use_dynamic_context=model.opts.use_dynamic_context,
+                  context_constant=all(torch.equal(contexts[0], c) for c in contexts),
+                  hidden_updated=True, lookup_indices_updated=True,
                   training_seconds=training_seconds, peak_allocated_mib=peak_memory)
     Path(args.output).write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))

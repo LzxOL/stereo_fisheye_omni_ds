@@ -197,13 +197,14 @@ class GEVModule(nn.Module):
     """
     def __init__(self, in_channels=32, num_groups=8,
                  reg_channels=(16, 32, 48), num_pyramid_levels=2,
-                 use_spatial_downsample=True):
+                 use_spatial_downsample=True, use_group_variance=False):
         super().__init__()
         self.num_groups = num_groups
         self.num_pyramid_levels = num_pyramid_levels
         self.use_spatial_downsample = use_spatial_downsample
 
-        hg_in = num_groups * 2  # GWC(num_groups) + variance(num_groups)
+        self.use_group_variance = use_group_variance
+        hg_in = num_groups * (2 if use_group_variance else 1)
         reg_channels = tuple(reg_channels)
         self.regularization = RegularizationNet3D(hg_in, channels=reg_channels)
 
@@ -232,27 +233,28 @@ class GEVModule(nn.Module):
             raise ValueError("Stereo GEV does not support the four-camera Triton kernels")
         if use_triton:
             from module_cnn_only.triton_gev import fused_gwc, fused_group_variance
-            # 1. GWC — Triton fused (no [B,G,CPG,H,W,Ds] intermediate)
             gwc = fused_gwc(ref, tgt, self.num_groups)
-            # 2. Multi-view group variance — Triton fused (no 1.2GB stack)
-            f0, f1, f2, f3 = camera_volumes
-            group_var = fused_group_variance(f0, f1, f2, f3, self.num_groups)
+            if self.use_group_variance:
+                f0, f1, f2, f3 = camera_volumes
+                group_var = fused_group_variance(f0, f1, f2, f3, self.num_groups)
         else:
-            # 1. GWC (pairwise similarity)
             gwc = groupwise_correlation_volume(ref, tgt, self.num_groups)
-            # 2. Multi-view group variance (two-view or original four-view consensus)
-            B, C, H, W, Ds = camera_volumes[0].shape
-            G = self.num_groups
-            cpg = C // G
-            # 按相机维统计，再对组内通道平均；保留 torch.var 默认的 correction=1。
-            # 双目时逐通道方差等价于 (F_left - F_right)^2 / 2，并非总体方差的 /4。
-            stacked = torch.stack(list(camera_volumes), dim=0)
-            stacked = stacked.view(num_cams, B, G, cpg, H, W, Ds)
-            group_var = stacked.var(dim=0).mean(dim=2)
+            # BASIC: original variance branch retained, skipped completely by default in stereo.
+            if self.use_group_variance:
+                B, C, H, W, Ds = camera_volumes[0].shape
+                G = self.num_groups
+                cpg = C // G
+                # Retain correction=1; two-view variance is (left-right)^2 / 2.
+                stacked = torch.stack(list(camera_volumes), dim=0)
+                stacked = stacked.view(num_cams, B, G, cpg, H, W, Ds)
+                group_var = stacked.var(dim=0).mean(dim=2)
 
-        # 3. Concat → permute to [B, 2G, Ds, H, W]
-        vol  = torch.cat([gwc, group_var], dim=1)              # [B, 2G, H, W, Ds]
-        vol = vol.permute(0, 1, 4, 2, 3).contiguous()        # [B, 2G, Ds, H, W]
+        # BASIC: keep the original concatenation available, but never evaluate it when disabled.
+        if self.use_group_variance:
+            vol = torch.cat([gwc, group_var], dim=1)
+        else:
+            vol = gwc
+        vol = vol.permute(0, 1, 4, 2, 3).contiguous()  # [B,G or 2G,D,H,W]
         if valid_mask is not None:
             # Stereo: invalid 3D candidates carry neither GWC nor variance evidence.
             vol = torch.where(valid_mask, vol, 0.0)

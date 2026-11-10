@@ -843,7 +843,7 @@ class OmniDS(nn.Module):
                     use_triton=self.opts.get('use_triton', False),
                 )
 
-            # 5. Build independent GEV from ref/tgt volumes  计算 GWC + Feature Variance
+            # 5. Build independent GEV from ref/tgt volumes  计算 GWC + Feature      Variance
             self.gev_module.build(ref, tgt, cam_vols,
                                   use_triton=self.opts.get('use_triton', False))
             del ref, tgt, cam_vols, sim_sph

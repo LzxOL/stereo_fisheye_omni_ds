@@ -541,9 +541,13 @@ class OmniDS(nn.Module):
         opts.similarity_type = 'correlation'
         # Distillation: build the lightweight student encoder (see --distilled)
         opts.use_student = False
+        opts.use_group_variance = True
+        opts.use_dynamic_context = True
         opts.num_cams = 4
         if varargin is not None and varargin.get('num_cams', 4) == 2:
             # Stereo defaults: volume [D,H,W]=[96,160,240], output H/W doubles.
+            opts.use_group_variance = False
+            opts.use_dynamic_context = False
             opts.num_invdepth = opts.num_depth_samples = 96
             opts.equi_h, opts.equi_w = 320, 480
 
@@ -555,6 +559,8 @@ class OmniDS(nn.Module):
                 raise ValueError('Stereo mode does not support the four-camera Triton kernels')
             if self.opts.num_invdepth != self.opts.num_depth_samples:
                 raise ValueError('Stereo uses one complete candidate axis: num_invdepth == num_depth_samples')
+        if self.opts.num_cams == 4 and not (self.opts.use_group_variance and self.opts.use_dynamic_context):
+            raise ValueError('Ablation switches are stereo-only; four-camera mode retains both modules')
         # CNN-ONLY: reject incompatible paths, including direct Python callers.
         if self.opts.use_dino_sim or self.opts.use_student:
             raise ValueError("CNN-only does not support use_dino_sim or the distilled student")
@@ -664,6 +670,7 @@ class OmniDS(nn.Module):
             reg_channels=getattr(self.opts, 'gev_reg_channels', (16, 32, 48)),
             num_pyramid_levels=getattr(self.opts, 'gev_num_pyramid_levels', 2),
             use_spatial_downsample=getattr(self.opts, 'gev_use_spatial_downsample', True),
+            use_group_variance=self.opts.use_group_variance,
         )
 
         # Update block; similarity_context is passed in for per-iteration lookup
@@ -843,7 +850,7 @@ class OmniDS(nn.Module):
         cnn_erp = (per_cam * weights.unsqueeze(2)).sum(dim=1)  # [B, C, H, W]
         return cnn_erp
 
-    def forward(self, imgs, grids, iters=12, test_mode=False, ocams=None, distilled=False, valid_mask=None):
+    def forward(self, imgs, grids, iters=12, test_mode=False, ocams=None, distilled=False, valid_mask=None, left_valid_mask=None):
         """
         Forward pass with separate GEV + Similarity Context.
 
@@ -851,6 +858,9 @@ class OmniDS(nn.Module):
         repeated along D. valid_mask is required and includes both cameras' FOV
         and invalid-pixel masks. Outputs are continuous indices in the SAME D-axis
         at twice the spatial resolution, not metric depth or horizontal disparity.
+        left_valid_mask: optional bool [B,1,H,W] for static left-only context.
+        Include the camera invalid_mask here unless invisible left pixels are
+        already encoded as out-of-range coordinates in the left grid.
         """
         if len(imgs) != self.opts.num_cams or len(grids) != self.opts.num_cams or iters < 1:
             raise ValueError('Expected num_cams images/grids and at least one iteration')
@@ -897,6 +907,7 @@ class OmniDS(nn.Module):
         grids_tensor = [g if torch.is_tensor(g) else torch.tensor(g, device=cnn_feats[0].device)
                         for g in grids]
         valid_pixels = None
+        context_valid = None
         if self.opts.num_cams == 2:
             expected = (self.erp_h, self.erp_w, self.opts.num_invdepth, 2)
             if any(tuple(g.shape) != expected for g in grids_tensor):
@@ -912,6 +923,19 @@ class OmniDS(nn.Module):
             # Sanitise invalid coordinates before grid_sample; NaN padding can poison backward.
             grids_tensor = [torch.where(torch.isfinite(g), g, 2.0) for g in grids_tensor]
             valid_pixels = valid_mask.any(dim=2)
+            left_grid = grids_tensor[0][:, :, 0]
+            context_valid = (torch.isfinite(left_grid).all(-1) & (left_grid.abs() <= 1).all(-1))[None, None]
+            context_valid = context_valid.expand(B, -1, -1, -1)
+            if left_valid_mask is not None:
+                if left_valid_mask.dtype != torch.bool or tuple(left_valid_mask.shape) != (B, 1, self.erp_h, self.erp_w):
+                    raise ValueError('left_valid_mask must be bool [B,1,H,W]')
+                left_valid_mask = left_valid_mask.to(context_valid.device)
+                context_valid = context_valid & left_valid_mask
+                # Left-invalid pixels cannot contribute matching evidence either.
+                valid_mask = valid_mask & left_valid_mask.unsqueeze(2)
+                valid_pixels = valid_mask.any(dim=2)
+            if self.opts.use_dynamic_context:
+                context_valid = valid_pixels
 
         # CNN-ONLY: no DINO dtype/device dependency.
 
@@ -964,9 +988,16 @@ class OmniDS(nn.Module):
             # if not self.opts.mixed_precision:
             #     dino_erp = dino_erp.float()
 
-            cnn_erp = self._sample_cnn_erp(
-                cnn_feats_stacked, grids_tensor, inv_depth_idx, valid_mask
-            )
+            if self.opts.use_dynamic_context:
+                cnn_erp = self._sample_cnn_erp(
+                    cnn_feats_stacked, grids_tensor, inv_depth_idx, valid_mask
+                )
+            else:
+                # BASIC: one left-only sampling, independent of depth and right visibility.
+                grid = grids_tensor[0][:, :, 0].unsqueeze(0).expand(B, -1, -1, -1)
+                cnn_erp = F.grid_sample(cnn_feats_stacked[:, 0], grid.to(cnn_feats_stacked.dtype),
+                                        padding_mode='zeros', align_corners=True)
+                cnn_erp = torch.where(context_valid, cnn_erp, 0.0)
             if not self.opts.mixed_precision:
                 cnn_erp = cnn_erp.float()
             if self.cnn_erp_proj is not None:
@@ -977,8 +1008,8 @@ class OmniDS(nn.Module):
             context = torch.relu(self.context_proj(cnn_erp))
             net = torch.tanh(self.state_proj(cnn_erp))
             if valid_pixels is not None:
-                context = torch.where(valid_pixels, context, 0.0)
-                net = torch.where(valid_pixels, net, 0.0)
+                context = torch.where(context_valid, context, 0.0)
+                net = torch.where(context_valid, net, 0.0)
 
         # Iterative refinement
         predictions = []
@@ -986,7 +1017,8 @@ class OmniDS(nn.Module):
         for itr in range(iters):
             inv_depth_idx = inv_depth_idx.detach()
 
-            if itr > 0:
+            # BASIC: original refresh code retained for use_dynamic_context=True.
+            if itr > 0 and self.opts.use_dynamic_context:
                 # CNN-ONLY: resample context at current depth; never reset recurrent net.
                 # reference_points = self.compute_reference_points_from_grids(grids_tensor, inv_depth_idx)
 

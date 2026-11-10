@@ -1,5 +1,7 @@
 # OmniDS CNN-only Baseline
 
+当前双目默认已进一步简化为 **GWC-only + Static Left Context**，开关和最新验证见文末。四目路径保持原有行为；下文此前阶段的动态 Context/Variance 描述是可恢复的消融路径。
+
 本次是在当前工作树上完整复制 `module/` 得到 `module_cnn_only/`，再做最小改动。
 原 `module/` 及其中原有的未提交阅读注释均保留，已逐文件核对 SHA256 未变化。
 这仍然是**四目、Rig-centered ERP 深度预测**，没有引入之前 PDF-Omni 双目 Baseline 的结构。
@@ -103,7 +105,7 @@ CUDA_VISIBLE_DEVICES=1 python tools/smoke_cnn_only.py \
 
 没有运行完整 Epoch/收敛实验，没有测试 Triton 路径，也未执行原 DINO 分支的权重推理。当前结果证明 CNN-only 的完整数据流及训练/测试接口可运行，不代表其精度已经达到原论文模型。
 
-## 双目网络接口（本次新增，尚未接入双目训练数据）
+## 双目网络接口（网络阶段；真实 GT 训练适配见文末）
 
 上文的训练命令仍然用于四目 CNN-only。现在同一包通过 `num_cams=2/4` 保留两条路径，默认仍为四目；没有复制另一套网络，也没有修改原始 `module/`、Dataset、训练和测试入口。
 
@@ -172,7 +174,7 @@ python tools/smoke_cnn_only.py --num_cams 2 \
   --device cpu --output /tmp/omnids_stereo_cpu.json
 
 # 正式尺寸：真实左右图像、真实标定、12轮 AMP 前后向与参数更新。
-# 本阶段尚无左光心 GT，损失仍使用人工索引目标，绝不使用 Rig GT 冒充左 GT。
+# 这个独立网络工具使用人工索引目标；真实左光心 GT 的训练命令见文末。
 CUDA_VISIBLE_DEVICES=1 python tools/smoke_cnn_only.py --num_cams 2 \
   --full_size --real_sample --iters 12 \
   --db_root /root/lzx_ws/datasets/Omnidirectional_Stereo_Dataset \
@@ -192,4 +194,107 @@ CUDA_VISIBLE_DEVICES=1 python tools/smoke_cnn_only.py --num_cams 2 \
 
 机器可读结果见 `CNN_ONLY_STEREO_VALIDATION.json`。
 
-**本阶段不提供双目正式训练命令。** 当前 `train.py/test.py --cnn_only` 的 Dataset 仍是原四目/Rig-centered 流程，不能直接用于双目权重。下一阶段需实现左光心局部球面 GT 转换、输出网格监督 Mask 和训练入口适配，再评估真实训练精度。
+**上述结果属于独立网络验证，不是真实 GT 训练。** 当前 `train.py --stereo` 已按文末章节接入左光心 GT；`--cnn_only` 单独使用仍是四目，原 `test.py` 仍未适配双目数据，不能直接用它评估双目权重。
+
+## 基础双目 Baseline：GWC-only + Static Left Context
+
+双目默认 `use_group_variance=False`、`use_dynamic_context=False`。原方差和动态采样代码均保留在开关分支中；四目默认仍使用二者，不改变原四目权重结构与计算。
+
+```python
+model = OmniDS(Edict(num_cams=2, mixed_precision=True)).cuda()
+predictions = model([left, right], [grid_left, grid_right],
+                    valid_mask=joint_valid, left_valid_mask=left_valid, iters=12)
+```
+
+- `GEVModule` 不再计算 `stack/var` 或拼接方差，直接将 GWC 输入原 3D U-Net，入口由 16 改为 8 通道；Guided Excitation、内部通道、输出及深度金字塔不变。
+- Context 在迭代前只对左 CNN 特征做一次 `grid_sample`，使用深度不变的左 Grid；两个原投影头产生静态 Context 和初始 Hidden。GRU 始终复用同一 Context，Hidden 继续递归更新。
+- Similarity 和 GEV 每轮仍根据当前索引 Lookup。没有移除匹配分支或修改 MotionEncoder/GRU/DepthHead/凸上采样。
+- `left_valid_mask` 为 bool `[B,1,160,240]`，只描述左相机自身的有效投影；不能用左右共同候选的 `any(D)` 替代。未提供时由左 Grid 的有限性和范围推导，因此调用方必须在左 Grid 中将相机 invalid_mask 编码为越界值，或显式提供左 Mask。
+- `valid_mask` 仍为 bool `[B,1,96,160,240]`，描述共同候选有效性。左 Mask 若显式提供，也会排除对应位置的匹配证据；相反，右侧不可见不会清空有效左 Context。最终无双目支持的位置仍输出零。
+
+默认关键尺寸没有变化：Context `[B,32,160,240]`、Hidden `[B,64,160,240]`、Similarity/GEV Lookup 为 36/18 通道、GRU 输入 `[B,160,160,240]`、输出 `[B,1,320,480]` 且索引保持 `[0,95]`。U-Net 入口现在是 `[B,8,96,80,120]`（已执行原空间池化）。
+
+恢复原双目创新路径时明确设置：
+
+```python
+model = OmniDS(Edict(num_cams=2, use_group_variance=True, use_dynamic_context=True))
+```
+
+开关相互独立，支持 GWC-only/Variance 与 Static/Dynamic 的四种组合。旧 16 通道 GEV 权重不能严格加载到基础 8 通道结构，程序会正常报错；未实现 `strict=False` 或静默跳过。恢复两个开关后旧双目权重可严格加载。
+
+最新验证沿用同一个 Smoke Test：
+
+```bash
+# 基础双目，小尺寸前后向、Mask 和权重重载。
+python tools/smoke_cnn_only.py --num_cams 2 --db_root /data
+
+# 恢复两个创新模块，检查原双目路径。
+python tools/smoke_cnn_only.py --num_cams 2 --use_group_variance --use_dynamic_context --db_root /data
+
+# 正式尺寸、真实图像/标定、12轮 AMP；网络测试仍使用人工索引目标。
+CUDA_VISIBLE_DEVICES=1 python tools/smoke_cnn_only.py --num_cams 2 \
+  --full_size --real_sample --iters 12 --mixed_precision --device cuda \
+  --db_root /root/lzx_ws/datasets/Omnidirectional_Stereo_Dataset
+```
+
+实际验证通过：
+
+- 基础模式禁用 `Tensor.var` 和原动态采样方法的执行，Forward/Backward 仍通过；实测 U-Net 入口为 8 通道。
+- 12 轮中 Context/Hidden 初始化各 1 次，Similarity/GEV Lookup 各 12 次；逐轮 Context 数值完全相同，Hidden 与查询索引持续变化。
+- 左侧独立有效性、全部匹配候选无效但左 Context 仍有效、显式左 Mask、部分/全部无效候选、NaN 网格、上采样与 AMP 检查通过。
+- 两个开关分别开启和同时开启的路径、严格保存重载通过；四目与之前独立快照的训练输出、梯度及推理结果逐元素一致。
+- 默认正式尺寸 12 轮训练步峰值 allocated 4802.32 MiB（约 4.69 GiB），该数字仅对应这次网络 Smoke Test，不代表完整训练显存。
+
+上述结果是人工索引目标的网络验证；下面单独列出新增的真实左光心 GT 训练验证，二者不混用。
+
+
+## 基于原 train.py 的双目训练适配
+
+只在现有 `train.py` 中增加 `--stereo` 分支，没有复制训练入口、优化器或训练循环。原 `fetch_optimizer` 与参数计数函数 AST 不变，仍用原 AdamW、OneCycleLR、Sequence Loss、梯度裁剪和 Checkpoint 字段；没有 LEC 或 DINO 蒸馏。`--stereo` 自动选择 CNN-only、两目、96 候选和基础开关 False/False；不加它时保持原四目行为和默认尺寸。
+
+唯一新增的数据文件 `dataset_stereo.py` 继承原 `Dataset`，复用原 OCam、Rig 变换、读图、灰度转换、invalid-mask 归一化及光度增强。它仍返回原 `(imgs, gt, valid, raw_imgs)`，使训练循环无需换一套数据格式。这里不能直接调用原四路 `loadImages` 或已裁剪的 Rig GT 加载器：
+
+- 只读取指定左右鱼眼，保持 768×800，不做几何增强。使用两张图共享的原 `photo_aug`，不调用四目 eraser。
+- 使用真实配置中的完整 192 逆深度轴，按 `[0,2,...,190]` 选出 96 值，训练/输出/GT 都解释为工作轴 `[0,95]`。边界之外的 GT 无效，不把第 191 层误算进来。
+- 最终 320×480 的角度网格是输出定义；工作 160×240 射线取最终网格 `[::2,::2]`，对应凸上采样的 2×空间关系。左 Grid 深度广播，右 Grid 按深度变换/投影，joint 与 left Mask 独立计算。
+- 从完整原始逆深度 TIFF 恢复 Rig 点云，变换到左相机，重新计算径向距离和方向，直接 Z-buffer 到最终 320×480。没有缩放原 GT、工作 GT 插值或索引乘 2。
+- 监督要求 GT 点在左右相机的有效视场内，并进行已观测点云的左右相机 Z-buffer 检查；这不能恢复 Rig 中心未观测到的表面。GT Mask 再与工作 joint-any 的最近邻 2×输出支持及相邻候选有效性相交，空洞保持无效。
+- 官方 9216 个训练样本默认划出 512 验证，实际训练 8704；官方 1024 测试样本保留。`--val_count 0` 可禁用验证，不对空数组计算均值。
+
+在 CUDA 环境的 OmniDS 根目录运行：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python train.py --stereo \
+  --ref_cam cam4 --target_cam cam3 \
+  --db_root /root/lzx_ws/datasets/Omnidirectional_Stereo_Dataset \
+  --dbname omnithings --mixed_precision --batch_size 1 --train_iters 12 \
+  --name OmniDS_Stereo_Basic
+```
+
+`--db_root` 是 `omnithings/` 的父目录。默认工作体 96×160×240、输出 320×480。原训练默认 100 Epoch 不变，可自行传 `--total_epochs`；本次没有启动完整训练。相机对可配置，cam4→cam3 是这次验证用的实际标定相机对，不是硬编码模型假设或精度最优结论。默认角度是根据实际共同视场推导的中心、水平130°和垂直±45°，逐候选 Mask 仍决定有效性。
+
+恢复创新模块时增加 `--use_group_variance --use_dynamic_context`。恢复训练用 `--restore_ckpt`，只加载自己的兼容双目 Checkpoint；权重严格加载，恢复时校验相机标定、候选轴、角度、网格 metadata 和两个消融开关，禁止静默混用 Rig GT/旧192轴或不兼容16通道权重。动态 Context 开关即使不改变权重 Shape，也必须与恢复 Checkpoint 一致，否则明确报错。Checkpoint 额外保存 scheduler、GradScaler、global_step、optimizer_updates、真实几何和训练参数。双目 AMP 跳过 optimizer 更新时也跳过 scheduler；原四目更新顺序不改。
+
+有限规模真实 GT 验证命令：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python train.py --stereo \
+  --ref_cam cam4 --target_cam cam3 \
+  --db_root /root/lzx_ws/datasets/Omnidirectional_Stereo_Dataset \
+  --mixed_precision --total_epochs 1 --max_train_steps 4 --max_eval_samples 1 \
+  --no_augment --name OmniDS_stereo_basic_train_smoke
+```
+
+`--max_train_steps` 是受限 Smoke Test：只保存一个部分 Epoch Checkpoint，并标记 `bounded_smoke=True`，不应把它当作完成完整 Epoch 的模型。正式训练去掉这两个 max 参数。
+
+实际结果（2026-11-10，容器 `/tmp/OmniDS-basic`）：
+
+- 真实数据读取：两路 `[1,768,800]`、最终 GT `[320,480]`；首个训练样本有效监督约21.15%，有效索引约0～69.06；未插值填补空洞。
+- 正式96×160×240工作体、12轮AMP，原 `train.py` 执行4个真实有监督batch，完成3次 optimizer 更新，1次由GradScaler跳过；随后1帧held-out验证通过并保存原格式DataParallel权重。
+- 由该 Checkpoint 恢复后执行1个batch，global_step从4变5，optimizer_updates从3变4；scheduler恢复并与更新次数一致，完成验证及保存。
+- 另外1个FP32有监督batch与 `--val_count 0` 检查通过，验证明确跳过、没有空均值NaN；刻意改变保存的 Dynamic Context 开关后，恢复会被明确拒绝，不会因权重 Shape 相同而静默改变模型行为。
+- 独立稀疏Rig GT单点检查通过：左径向距离5.03587125083058、96轴索引31.29051399230957，与独立坐标变换一致；最近表面Z-buffer检查通过。
+
+原 `Dataset.evalError` 也继续复用：它报告以 D 归一化的百分比误差，日志中的 MAE/RMS 不是米；Sequence Loss 则在 `[0,95]` 工作索引单位中计算。这些受限验证证明数据/梯度/更新/恢复接口可执行，不证明网络已收敛。
+
+独立 `test.py`、通用双目可视化和其他数据集尚未适配。训练内部的双目验证已接好，不要使用原四目全景可视化或 Rig GT 测试路径解释双目输出。

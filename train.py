@@ -44,6 +44,23 @@ torch.backends.cuda.benchmark = True
 
 parser = ArgumentParser(description='Training for OmniDS')
 parser.add_argument('--cnn_only', action='store_true', help='use CNN-only dynamic context, without DINO')
+parser.add_argument('--stereo', action='store_true', help='train the two-camera CNN-only baseline')
+parser.add_argument('--ref_cam', choices=['cam1', 'cam2', 'cam3', 'cam4'])
+parser.add_argument('--target_cam', choices=['cam1', 'cam2', 'cam3', 'cam4'])
+parser.add_argument('--sweep_size', type=int, nargs=2, default=[160, 240], help='stereo working H W; output is 2H 2W')
+parser.add_argument('--sweep_azimuth_center_deg', type=float, help='default: infer from actual calibrated overlap')
+parser.add_argument('--sweep_azimuth_span_deg', type=float, default=130.)
+parser.add_argument('--sweep_elevation_min_deg', type=float, default=-45.)
+parser.add_argument('--sweep_elevation_max_deg', type=float, default=45.)
+parser.add_argument('--use_group_variance', action='store_true', help='stereo ablation: restore GWC + variance')
+parser.add_argument('--use_dynamic_context', action='store_true', help='stereo ablation: restore dynamic context')
+parser.add_argument('--val_count', type=int, default=512, help='stereo held-out official-training frames')
+parser.add_argument('--seed', type=int, default=0, help='stereo split and training seed')
+parser.add_argument('--gt_width', type=int, help='select complete raw GT TIFF width when multiple versions exist')
+parser.add_argument('--no_augment', action='store_true', help='disable stereo shared photometric augmentation')
+parser.add_argument('--no_gt_occlusion_check', action='store_true', help='disable observed-point-cloud visibility checks')
+parser.add_argument('--max_train_steps', type=int, help='stereo bounded smoke run; stop after this many training batches')
+parser.add_argument('--max_eval_samples', type=int, help='stereo bounded validation sample count')
 
 parser.add_argument('--name', default='ROmniStereo_BEV', help="name of your experiment")
 parser.add_argument('--restore_ckpt', help="restore checkpoint")
@@ -134,6 +151,29 @@ parser.add_argument('--wandb', action='store_true', help='log training to wandb'
     
 args = parser.parse_args()
 
+if args.stereo:
+    args.cnn_only = True
+    if args.dbname != ['omnithings'] or not args.ref_cam or not args.target_cam or args.ref_cam == args.target_cam:
+        parser.error('--stereo requires OmniThings and two distinct --ref_cam/--target_cam')
+    if args.distilled or args.use_dino_sim or args.triton or args.encoder_downsample_twice or args.num_downsample != 1:
+        parser.error('Stereo baseline requires the original stride-2 CNN; DINO, student and Triton are unsupported')
+    explicit_depth = any(s == '--num_invdepth' or s.startswith('--num_invdepth=') for s in sys.argv[1:])
+    if not explicit_depth:
+        args.num_invdepth = args.num_depth_samples
+    if args.num_invdepth != args.num_depth_samples:
+        parser.error('Stereo uses one working candidate axis: --num_invdepth must equal --num_depth_samples')
+    output_size = [2 * n for n in args.sweep_size]
+    explicit_size = any(s == '--equirect_size' or s.startswith('--equirect_size=') for s in sys.argv[1:])
+    if explicit_size and args.equirect_size != output_size:
+        parser.error('Stereo --equirect_size must equal 2 * --sweep_size')
+    args.equirect_size = output_size
+    if args.val_count < 0 or any(n is not None and n < 1 for n in (args.max_train_steps, args.max_eval_samples)):
+        parser.error('Smoke limits must be positive, val_count nonnegative')
+    if args.name == parser.get_default('name'):
+        args.name = 'OmniDS_Stereo_Basic'
+elif args.ref_cam or args.target_cam or args.max_train_steps is not None or args.max_eval_samples is not None:
+    parser.error('Camera-pair and bounded-smoke options require --stereo')
+
 if args.cnn_only:
     if args.distilled or args.use_dino_sim:
         parser.error('--cnn_only cannot be combined with --distilled or --use_dino_sim')
@@ -173,6 +213,10 @@ opts.net_opts.encoder_downsample_twice = args.encoder_downsample_twice
 opts.net_opts.num_downsample = args.num_downsample
 opts.net_opts.mixed_precision = args.mixed_precision
 opts.net_opts.fix_bn = args.fix_bn
+if args.stereo:
+    opts.net_opts.num_cams = 2
+    opts.net_opts.use_group_variance = args.use_group_variance
+    opts.net_opts.use_dynamic_context = args.use_dynamic_context
 # ERP / cross-attention
 opts.net_opts.equi_h = args.equirect_size[0]
 opts.net_opts.equi_w = args.equirect_size[1]
@@ -232,7 +276,19 @@ def fetch_optimizer(model, num_steps):
 
 
 def train(epoch_total, load_state):
-    if len(opts.dbname) > 1:
+    if args.stereo:
+        from dataset_stereo import StereoDataset
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        data = StereoDataset(opts.dbname[0], opts.data_opts, opts.db_root, args.ref_cam, args.target_cam,
+                             sweep_size=args.sweep_size,
+                             angles=[args.sweep_azimuth_center_deg, args.sweep_azimuth_span_deg,
+                                     args.sweep_elevation_min_deg, args.sweep_elevation_max_deg],
+                             val_count=args.val_count, seed=args.seed, augment=not args.no_augment,
+                             gt_width=args.gt_width, check_occlusion=not args.no_gt_occlusion_check)
+        LOG_INFO('Stereo: left-centred GT, working indices [0,%d], output %s; official test split reserved' %
+                 (args.num_invdepth - 1, data.output_size))
+    elif len(opts.dbname) > 1:
         data = MultiDataset(opts.dbname, opts.data_opts, db_root=opts.db_root)
     else:
         data = Dataset(opts.dbname[0], opts.data_opts, db_root=opts.db_root)
@@ -241,7 +297,9 @@ def train(epoch_total, load_state):
                                            num_workers=0, drop_last=True)
     total_num_steps = len(data)*opts.total_epochs//opts.batch_size
 
-    LOG_INFO("Using module_cnn_only.network.OmniDS (dynamic CNN context + GEV)" if args.cnn_only
+    LOG_INFO("Using stereo CNN baseline: group_variance=%s, dynamic_context=%s" %
+             (args.use_group_variance, args.use_dynamic_context) if args.stereo else
+             "Using module_cnn_only.network.OmniDS (dynamic CNN context + GEV)" if args.cnn_only
              else "Using OmniDS (DINO context + separate GEV)")
     if not args.cnn_only:
         LOG_INFO(f"  DINO model: {opts.net_opts.dino_model}, freeze: {opts.net_opts.freeze_dino}")
@@ -256,6 +314,8 @@ def train(epoch_total, load_state):
     scaler = GradScaler(enabled=opts.net_opts.mixed_precision)
 
     start_epoch = 0
+    optimizer_updates = 0
+    resume_step = None
     if args.wandb:
         wandb.init(
             entity="entity",   
@@ -269,6 +329,12 @@ def train(epoch_total, load_state):
                         else torch.load(opts.snapshot_path))
             if args.cnn_only and not snapshot.get('net_opts', {}).get('cnn_only', False):
                 raise ValueError('CNN-only requires a CNN-only checkpoint; original DINO checkpoints are incompatible')
+            if args.stereo and snapshot.get('stereo_geometry') != data.metadata:
+                raise ValueError('Restore checkpoint stereo geometry differs; do not mix camera pairs/candidate axes')
+            if args.stereo:
+                for key in ('use_group_variance', 'use_dynamic_context'):
+                    if snapshot['net_opts'].get(key) != opts.net_opts[key]:
+                        raise ValueError(f'Restore checkpoint {key} differs; pass the matching ablation switch')
             if 'net_state_dict' in snapshot.keys():
                 net.load_state_dict(snapshot['net_state_dict'])
                 LOG_INFO('checkpoint %s is loaded' % (opts.snapshot_path))
@@ -278,6 +344,13 @@ def train(epoch_total, load_state):
                 epoch_loss = snapshot['epoch_loss']
             if 'optimizer' in snapshot.keys():
                 optimizer.load_state_dict(snapshot['optimizer'])
+            if args.stereo:
+                if 'scheduler' in snapshot:
+                    scheduler.load_state_dict(snapshot['scheduler'])
+                if 'scaler' in snapshot:
+                    scaler.load_state_dict(snapshot['scaler'])
+                optimizer_updates = snapshot.get('optimizer_updates', 0)
+                resume_step = snapshot.get('global_step')
             if 'epoch' in snapshot.keys() and 'epoch_loss' in snapshot.keys():
                 LOG_INFO('startepoch:%d epoch_loss:%f' % (start_epoch, epoch_loss))
         elif opts.pretrain_path is None:
@@ -288,6 +361,8 @@ def train(epoch_total, load_state):
                         else torch.load(opts.pretrain_path))
             if args.cnn_only and not snapshot.get('net_opts', {}).get('cnn_only', False):
                 raise ValueError('CNN-only requires a CNN-only checkpoint; original DINO checkpoints are incompatible')
+            if args.stereo and snapshot.get('net_opts', {}).get('num_cams') != 2:
+                raise ValueError('Stereo pretraining requires a two-camera checkpoint; weights load strictly')
             if 'net_state_dict' in snapshot.keys():
                 net.load_state_dict(snapshot['net_state_dict'])
                 LOG_INFO('checkpoint %s is loaded' % (opts.pretrain_path))
@@ -295,16 +370,24 @@ def train(epoch_total, load_state):
             sys.exit('%s do not exsits' % (opts.snapshot_path))
 
     grids = [torch.tensor(grid, requires_grad=False).cuda() for grid in data.grids]
+    candidate_mask = left_mask = None
+    if args.stereo:
+        candidate_mask = torch.tensor(data.candidate_valid, dtype=torch.bool).cuda()[None]
+        left_mask = torch.tensor(data.left_valid_mask, dtype=torch.bool).cuda()[None]
     if not osp.exists(opts.model_dir):
         os.makedirs(opts.model_dir, exist_ok=True)
         LOG_INFO('"%s" directory created' % (opts.model_dir))
     total_iters = len(data)*start_epoch//opts.batch_size
+    if resume_step is not None:
+        total_iters = resume_step
+    stop_training = False
 
     for epoch in range(start_epoch, epoch_total):
         # training
         net.train()
         train_loss = 0
         epoch_loss = 0
+        usable_batches = 0
         LOG_INFO('\nEpoch: %d' % epoch)
         if args.wandb:
             wandb.log({"Epoch": epoch}, step=total_iters)
@@ -316,11 +399,21 @@ def train(epoch_total, load_state):
             imgs = [img.cuda() for img in imgs]
             valid = valid.cuda()
             gt = gt.cuda()
+            if args.stereo and not valid.any():
+                if args.max_train_steps:
+                    raise ValueError('Smoke batch has no valid left-centred supervision')
+                LOG_INFO('Skipping stereo batch without valid supervision')
+                continue
 
             optimizer.zero_grad()
             # Pass ocams for principal point bias (if available)
             ocams = getattr(data, 'ocams', None)
-            if args.cnn_only:
+            if args.stereo:
+                batch = imgs[0].shape[0]
+                predictions = net.module.forward(imgs, grids, iters=opts.train_iters,
+                                                  valid_mask=candidate_mask.expand(batch, -1, -1, -1, -1),
+                                                  left_valid_mask=left_mask.expand(batch, -1, -1, -1))
+            elif args.cnn_only:
                 predictions = net.module.forward(imgs, grids, iters=opts.train_iters, ocams=ocams)
             else:
                 predictions = net.module.forward(imgs, grids, ocams=ocams)
@@ -328,25 +421,41 @@ def train(epoch_total, load_state):
             loss = sequence_loss(predictions, gt.unsqueeze(1), valid.unsqueeze(1))
             
             train_loss += loss.data
+            usable_batches += 1
             # train_loss += loss2.data *0.5
             # total_loss = loss + 0.5 * loss2
 
-            epoch_loss = train_loss / (step + 1)
+            epoch_loss = train_loss / (usable_batches if args.stereo else step + 1)
 
             if step % 200 == 0:
-                LOG_INFO("Iter %d/%d training loss = %.3f, average training loss for every step = %.3f, time = %.2f" % (total_iters - epoch*len(data),len(data), loss, epoch_loss, time.time() - start_time))
+                if args.stereo:
+                    LOG_INFO('Step %d training loss = %.3f, epoch mean = %.3f, forward time = %.2f' %
+                             (total_iters, float(loss.detach()), float(epoch_loss), time.time() - start_time))
+                else:
+                    LOG_INFO("Iter %d/%d training loss = %.3f, average training loss for every step = %.3f, time = %.2f" % (total_iters - epoch*len(data),len(data), loss, epoch_loss, time.time() - start_time))
             # writer.add_scalar("train/loss", loss, total_iters)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
             scaler.step(optimizer)
-            scheduler.step()
-            scaler.update()
+            if args.stereo:
+                previous_scale = scaler.get_scale()
+                scaler.update()
+                # Preserve the original optimizer/scheduler, but do not advance LR
+                # when AMP has skipped a stereo optimizer update.
+                if scaler.get_scale() >= previous_scale:
+                    scheduler.step()
+                    optimizer_updates += 1
+            else:
+                scheduler.step()
+                scaler.update()
 
             total_iters += 1
 
-            if args.wandb and total_iters % 300 == 0:
+            if args.stereo and args.wandb and total_iters % 300 == 0:
+                wandb.log({'LR': scheduler.get_last_lr()[0], 'Train/total_loss': loss.item()}, step=total_iters)
+            if args.wandb and total_iters % 300 == 0 and not args.stereo:
                 wandb.log({
                     "LR": scheduler.get_last_lr()[0],
                     "Train/total_loss": loss.item(),
@@ -375,10 +484,18 @@ def train(epoch_total, load_state):
                     [wandb.Image(img, caption=caption) for caption, img in images.items()]
                 )
                 wandb.log(wimages, step=total_iters)
+            if args.stereo and args.max_train_steps and step + 1 >= args.max_train_steps:
+                stop_training = True
+                break
     
+        if args.stereo and not usable_batches:
+            raise ValueError('No valid stereo supervision in the entire training epoch')
+
         # evaluation
         net.eval()
         eval_list = data.opts.test_idx
+        if args.stereo and args.max_eval_samples:
+            eval_list = eval_list[:args.max_eval_samples]
 
         rank0 = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
         net_eval = net.module if hasattr(net, "module") else net  # DDP면 원본 모듈로 eval
@@ -388,12 +505,18 @@ def train(epoch_total, load_state):
             for d in range(len(eval_list)):
                 fidx = eval_list[d]
                 imgs, gt, valid, raw_imgs = data.loadSample(fidx)
+                if args.stereo and not valid.any():
+                    errors[d, :] = np.nan
+                    continue
                 imgs = [torch.Tensor(img).unsqueeze(0).cuda() for img in imgs]
                 # breakpoint()
                 # Pass ocams for LoRA adaptation (same as training)
                 ocams = getattr(data, 'ocams', None)
                 with torch.no_grad():
-                    if args.cnn_only:
+                    if args.stereo:
+                        invdepth_idx = net_eval(imgs, grids, test_mode=True, iters=opts.train_iters,
+                                               valid_mask=candidate_mask, left_valid_mask=left_mask)
+                    elif args.cnn_only:
                         invdepth_idx = net_eval(imgs, grids, test_mode=True, iters=opts.train_iters)
                     else:
                         invdepth_idx = net_eval(imgs, grids, test_mode=True)
@@ -410,12 +533,19 @@ def train(epoch_total, load_state):
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
         
-        mean_errors = errors.mean(axis=0)
-        LOG_INFO('>1: %.3f, >3: %.3f, >5: %.3f, MAE: %.3f, RMS: %.3f' %
-            (mean_errors[0], mean_errors[1], mean_errors[2], mean_errors[3], mean_errors[4]))
+        if args.stereo:
+            measured = np.isfinite(errors).all(axis=1)
+            mean_errors = errors[measured].mean(axis=0) if measured.any() else None
+        else:
+            mean_errors = errors.mean(axis=0)
+        if mean_errors is None:
+            LOG_INFO('Stereo validation skipped: no configured or valid validation samples')
+        else:
+            LOG_INFO('>1: %.3f, >3: %.3f, >5: %.3f, MAE: %.3f, RMS: %.3f' %
+                (mean_errors[0], mean_errors[1], mean_errors[2], mean_errors[3], mean_errors[4]))
 
         # logging
-        if args.wandb:
+        if args.wandb and not args.stereo:
             losses = dict()
             losses["val1"] = mean_errors[0]
             losses["val3"] = mean_errors[1]
@@ -453,13 +583,23 @@ def train(epoch_total, load_state):
         
         # save
         savefilename = opts.model_dir + '/%s_e%d.pth' % (osp.basename(opts.name), epoch)
-        torch.save({
+        snapshot = {
                 'net_state_dict': net.state_dict(),
                 'net_opts': opts.net_opts,
                 'epoch': epoch,
                 'optimizer': optimizer.state_dict(),
                 'epoch_loss': epoch_loss,
-            }, savefilename)
+            }
+        if args.stereo:
+            snapshot.update(net_opts=net.module.opts, scheduler=scheduler.state_dict(),
+                            scaler=scaler.state_dict(), global_step=total_iters,
+                            optimizer_updates=optimizer_updates, stereo_geometry=data.metadata,
+                            training_args=vars(args), bounded_smoke=bool(args.max_train_steps),
+                            usable_batches=usable_batches,
+                            validation_errors=mean_errors.tolist() if mean_errors is not None else None)
+        torch.save(snapshot, savefilename)
+        if stop_training:
+            break
 
 
 def main():

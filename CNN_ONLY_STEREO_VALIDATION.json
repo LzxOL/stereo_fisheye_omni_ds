@@ -476,7 +476,985 @@
       "left_depth_invariance": true
     }
   },
-  "protected_files_unchanged": true,
-  "scope": "Network only; stereo losses use synthetic candidate-index targets, not Rig-centred GT",
-  "gpu": "NVIDIA RTX 5090, physical GPU 1, batch size 1"
+  "scope": "Historical network tests, Basic GWC/static-context tests, and bounded real left-centred GT training are recorded separately.",
+  "gpu": "NVIDIA RTX 5090, physical GPU 1, batch size 1",
+  "basic_baseline": {
+    "basic_cpu": {
+      "device": "cpu",
+      "real_sample": false,
+      "input": [
+        [
+          1,
+          1,
+          64,
+          80
+        ],
+        [
+          1,
+          1,
+          64,
+          80
+        ]
+      ],
+      "grids": [
+        [
+          16,
+          24,
+          16,
+          2
+        ],
+        [
+          16,
+          24,
+          16,
+          2
+        ]
+      ],
+      "shapes": {
+        "cnn": [
+          [
+            1,
+            32,
+            32,
+            40
+          ],
+          [
+            1,
+            32,
+            32,
+            40
+          ]
+        ],
+        "profile": [
+          1,
+          16,
+          16,
+          24
+        ],
+        "gev_input": [
+          1,
+          8,
+          16,
+          8,
+          12
+        ],
+        "gev_before_spatial_upsample": [
+          1,
+          1,
+          16,
+          8,
+          12
+        ],
+        "context": [
+          1,
+          32,
+          16,
+          24
+        ],
+        "hidden_init": [
+          1,
+          64,
+          16,
+          24
+        ],
+        "similarity_lookup": [
+          1,
+          36,
+          16,
+          24
+        ],
+        "gev_lookup": [
+          1,
+          18,
+          16,
+          24
+        ],
+        "recurrent_hidden": [
+          1,
+          64,
+          16,
+          24
+        ],
+        "gru_input": [
+          1,
+          160,
+          16,
+          24
+        ],
+        "delta_index": [
+          1,
+          1,
+          16,
+          24
+        ],
+        "up_mask": [
+          1,
+          36,
+          16,
+          24
+        ]
+      },
+      "calls": {
+        "cnn": 1,
+        "profile": 1,
+        "gev_input": 1,
+        "gev_before_spatial_upsample": 1,
+        "context": 1,
+        "hidden_init": 1,
+        "similarity_lookup": 3,
+        "gev_lookup": 3,
+        "recurrent_hidden": 3,
+        "gru_input": 3,
+        "delta_index": 3,
+        "up_mask": 3
+      },
+      "predictions": [
+        [
+          1,
+          1,
+          32,
+          48
+        ],
+        [
+          1,
+          1,
+          32,
+          48
+        ],
+        [
+          1,
+          1,
+          32,
+          48
+        ]
+      ],
+      "loss": 6.44903564453125,
+      "gradient_l1": {
+        "cnn": 215.80395102051222,
+        "context": 0.8462924831546843,
+        "state": 2.067663529649508,
+        "similarity": 0.43390743951749755,
+        "gev": 15.191038026707247,
+        "gru": 586.8708654129878,
+        "depth_head": 593.340514421463,
+        "upsample_mask": 0.21733387518906966
+      },
+      "optimizer_update": true,
+      "checkpoint_reload": true,
+      "forbidden_imports": [],
+      "num_cams": 2,
+      "iterations": 3,
+      "input_gradient_l1": [
+        0.7434870600700378,
+        0.07470783591270447
+      ],
+      "mask_checks": {
+        "left_fallback": true,
+        "zero_context": true,
+        "constant_index_upsampling": true,
+        "invalid_lookup": true,
+        "partial_forward_backward": true,
+        "all_invalid_forward_backward": true,
+        "nonfinite_grid_forward_backward": true
+      },
+      "index_ranges": [
+        [
+          8.0,
+          8.0
+        ],
+        [
+          0.0,
+          8.301860809326172
+        ],
+        [
+          0.0,
+          8.523029327392578
+        ]
+      ],
+      "use_group_variance": false,
+      "use_dynamic_context": false,
+      "context_constant": true,
+      "hidden_updated": true,
+      "lookup_indices_updated": true,
+      "training_seconds": 0.2659458131529391,
+      "peak_allocated_mib": null
+    },
+    "basic_amp12": {
+      "device": "cuda",
+      "real_sample": true,
+      "input": [
+        [
+          1,
+          1,
+          768,
+          800
+        ],
+        [
+          1,
+          1,
+          768,
+          800
+        ]
+      ],
+      "grids": [
+        [
+          160,
+          240,
+          96,
+          2
+        ],
+        [
+          160,
+          240,
+          96,
+          2
+        ]
+      ],
+      "shapes": {
+        "cnn": [
+          [
+            1,
+            32,
+            384,
+            400
+          ],
+          [
+            1,
+            32,
+            384,
+            400
+          ]
+        ],
+        "profile": [
+          1,
+          96,
+          160,
+          240
+        ],
+        "gev_input": [
+          1,
+          8,
+          96,
+          80,
+          120
+        ],
+        "gev_before_spatial_upsample": [
+          1,
+          1,
+          96,
+          80,
+          120
+        ],
+        "context": [
+          1,
+          32,
+          160,
+          240
+        ],
+        "hidden_init": [
+          1,
+          64,
+          160,
+          240
+        ],
+        "similarity_lookup": [
+          1,
+          36,
+          160,
+          240
+        ],
+        "gev_lookup": [
+          1,
+          18,
+          160,
+          240
+        ],
+        "recurrent_hidden": [
+          1,
+          64,
+          160,
+          240
+        ],
+        "gru_input": [
+          1,
+          160,
+          160,
+          240
+        ],
+        "delta_index": [
+          1,
+          1,
+          160,
+          240
+        ],
+        "up_mask": [
+          1,
+          36,
+          160,
+          240
+        ]
+      },
+      "calls": {
+        "cnn": 1,
+        "profile": 1,
+        "gev_input": 1,
+        "gev_before_spatial_upsample": 1,
+        "context": 1,
+        "hidden_init": 1,
+        "similarity_lookup": 12,
+        "gev_lookup": 12,
+        "recurrent_hidden": 12,
+        "gru_input": 12,
+        "delta_index": 12,
+        "up_mask": 12
+      },
+      "predictions": [
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ],
+        [
+          1,
+          1,
+          320,
+          480
+        ]
+      ],
+      "loss": 113.97444152832031,
+      "gradient_l1": {
+        "cnn": 364.39305975753814,
+        "context": 2.6331562604755163,
+        "state": 6.4413579809479415,
+        "similarity": 1.6594177499209763,
+        "gev": 3.4527759251213865,
+        "gru": 3709.0129655376077,
+        "depth_head": 5806.534775733948,
+        "upsample_mask": 2.971500951331109
+      },
+      "optimizer_update": true,
+      "checkpoint_reload": true,
+      "forbidden_imports": [],
+      "num_cams": 2,
+      "iterations": 12,
+      "input_gradient_l1": [
+        198.09934997558594,
+        65.34255981445312
+      ],
+      "mask_checks": {},
+      "index_ranges": [
+        [
+          48.0,
+          48.0
+        ],
+        [
+          0.0,
+          48.15625
+        ],
+        [
+          0.0,
+          48.21875
+        ],
+        [
+          0.0,
+          48.25
+        ],
+        [
+          0.0,
+          48.3125
+        ],
+        [
+          0.0,
+          48.40625
+        ],
+        [
+          0.0,
+          48.53125
+        ],
+        [
+          0.0,
+          48.65625
+        ],
+        [
+          0.0,
+          48.78125
+        ],
+        [
+          0.0,
+          48.90625
+        ],
+        [
+          0.0,
+          49.03125
+        ],
+        [
+          0.0,
+          49.125
+        ]
+      ],
+      "use_group_variance": false,
+      "use_dynamic_context": false,
+      "context_constant": true,
+      "hidden_updated": true,
+      "lookup_indices_updated": true,
+      "training_seconds": 1.651161418762058,
+      "peak_allocated_mib": 4802.31689453125
+    },
+    "restored_stereo": {
+      "device": "cpu",
+      "real_sample": false,
+      "input": [
+        [
+          1,
+          1,
+          64,
+          80
+        ],
+        [
+          1,
+          1,
+          64,
+          80
+        ]
+      ],
+      "grids": [
+        [
+          16,
+          24,
+          16,
+          2
+        ],
+        [
+          16,
+          24,
+          16,
+          2
+        ]
+      ],
+      "shapes": {
+        "cnn": [
+          [
+            1,
+            32,
+            32,
+            40
+          ],
+          [
+            1,
+            32,
+            32,
+            40
+          ]
+        ],
+        "profile": [
+          1,
+          16,
+          16,
+          24
+        ],
+        "gev_input": [
+          1,
+          16,
+          16,
+          8,
+          12
+        ],
+        "gev_before_spatial_upsample": [
+          1,
+          1,
+          16,
+          8,
+          12
+        ],
+        "context": [
+          1,
+          32,
+          16,
+          24
+        ],
+        "hidden_init": [
+          1,
+          64,
+          16,
+          24
+        ],
+        "similarity_lookup": [
+          1,
+          36,
+          16,
+          24
+        ],
+        "gev_lookup": [
+          1,
+          18,
+          16,
+          24
+        ],
+        "recurrent_hidden": [
+          1,
+          64,
+          16,
+          24
+        ],
+        "gru_input": [
+          1,
+          160,
+          16,
+          24
+        ],
+        "delta_index": [
+          1,
+          1,
+          16,
+          24
+        ],
+        "up_mask": [
+          1,
+          36,
+          16,
+          24
+        ]
+      },
+      "calls": {
+        "cnn": 1,
+        "profile": 1,
+        "gev_input": 1,
+        "gev_before_spatial_upsample": 1,
+        "context": 3,
+        "hidden_init": 1,
+        "similarity_lookup": 3,
+        "gev_lookup": 3,
+        "recurrent_hidden": 3,
+        "gru_input": 3,
+        "delta_index": 3,
+        "up_mask": 3
+      },
+      "predictions": [
+        [
+          1,
+          1,
+          32,
+          48
+        ],
+        [
+          1,
+          1,
+          32,
+          48
+        ],
+        [
+          1,
+          1,
+          32,
+          48
+        ]
+      ],
+      "loss": 5.80742073059082,
+      "gradient_l1": {
+        "cnn": 193.06729400261293,
+        "context": 0.8567184040530265,
+        "state": 1.9499906088603893,
+        "view_weights": 0.18666761968052015,
+        "similarity": 0.686525220022304,
+        "gev": 19.36703528088401,
+        "gru": 688.0677129523829,
+        "depth_head": 654.973844408989,
+        "upsample_mask": 0.3438272774219513
+      },
+      "optimizer_update": true,
+      "checkpoint_reload": true,
+      "forbidden_imports": [],
+      "num_cams": 2,
+      "iterations": 3,
+      "input_gradient_l1": [
+        0.5791371464729309,
+        0.31901994347572327
+      ],
+      "mask_checks": {
+        "left_fallback": true,
+        "zero_context": true,
+        "constant_index_upsampling": true,
+        "invalid_lookup": true,
+        "partial_forward_backward": true,
+        "all_invalid_forward_backward": true,
+        "nonfinite_grid_forward_backward": true
+      },
+      "index_ranges": [
+        [
+          8.0,
+          8.0
+        ],
+        [
+          0.0,
+          8.077357292175293
+        ],
+        [
+          0.0,
+          8.140968322753906
+        ]
+      ],
+      "use_group_variance": true,
+      "use_dynamic_context": true,
+      "context_constant": false,
+      "hidden_updated": true,
+      "lookup_indices_updated": true,
+      "training_seconds": 0.2605054099112749,
+      "peak_allocated_mib": null
+    },
+    "four_camera": {
+      "device": "cpu",
+      "real_sample": false,
+      "input": [
+        [
+          1,
+          1,
+          64,
+          80
+        ],
+        [
+          1,
+          1,
+          64,
+          80
+        ],
+        [
+          1,
+          1,
+          64,
+          80
+        ],
+        [
+          1,
+          1,
+          64,
+          80
+        ]
+      ],
+      "grids": [
+        [
+          16,
+          32,
+          16,
+          2
+        ],
+        [
+          16,
+          32,
+          16,
+          2
+        ],
+        [
+          16,
+          32,
+          16,
+          2
+        ],
+        [
+          16,
+          32,
+          16,
+          2
+        ]
+      ],
+      "shapes": {
+        "cnn": [
+          [
+            1,
+            32,
+            32,
+            40
+          ],
+          [
+            1,
+            32,
+            32,
+            40
+          ],
+          [
+            1,
+            32,
+            32,
+            40
+          ],
+          [
+            1,
+            32,
+            32,
+            40
+          ]
+        ],
+        "profile": [
+          1,
+          16,
+          16,
+          32
+        ],
+        "gev_input": [
+          1,
+          16,
+          16,
+          8,
+          16
+        ],
+        "gev_before_spatial_upsample": [
+          1,
+          1,
+          16,
+          8,
+          16
+        ],
+        "context": [
+          1,
+          32,
+          16,
+          32
+        ],
+        "hidden_init": [
+          1,
+          64,
+          16,
+          32
+        ],
+        "similarity_lookup": [
+          1,
+          36,
+          16,
+          32
+        ],
+        "gev_lookup": [
+          1,
+          18,
+          16,
+          32
+        ],
+        "recurrent_hidden": [
+          1,
+          64,
+          16,
+          32
+        ],
+        "gru_input": [
+          1,
+          160,
+          16,
+          32
+        ],
+        "delta_index": [
+          1,
+          1,
+          16,
+          32
+        ],
+        "up_mask": [
+          1,
+          36,
+          16,
+          32
+        ]
+      },
+      "calls": {
+        "cnn": 1,
+        "profile": 1,
+        "gev_input": 1,
+        "gev_before_spatial_upsample": 1,
+        "context": 3,
+        "hidden_init": 1,
+        "similarity_lookup": 3,
+        "gev_lookup": 3,
+        "recurrent_hidden": 3,
+        "gru_input": 3,
+        "delta_index": 3,
+        "up_mask": 3
+      },
+      "predictions": [
+        [
+          1,
+          1,
+          32,
+          64
+        ],
+        [
+          1,
+          1,
+          32,
+          64
+        ],
+        [
+          1,
+          1,
+          32,
+          64
+        ]
+      ],
+      "loss": 10.251107215881348,
+      "gradient_l1": {
+        "cnn": 260.1291598106927,
+        "context": 1.2802385265749763,
+        "state": 3.0578756851573416,
+        "view_weights": 0.787017937283963,
+        "similarity": 2.044334846053971,
+        "gev": 32.891180709557375,
+        "gru": 1143.3831589892507,
+        "depth_head": 1528.967892408371,
+        "upsample_mask": 15.11149038374424
+      },
+      "optimizer_update": true,
+      "checkpoint_reload": true,
+      "forbidden_imports": [],
+      "num_cams": 4,
+      "iterations": 3,
+      "input_gradient_l1": [],
+      "mask_checks": {},
+      "index_ranges": [
+        [
+          8.0,
+          8.0
+        ],
+        [
+          7.778120517730713,
+          8.252959251403809
+        ],
+        [
+          7.61918306350708,
+          8.358695983886719
+        ]
+      ],
+      "use_group_variance": true,
+      "use_dynamic_context": true,
+      "context_constant": false,
+      "hidden_updated": true,
+      "lookup_indices_updated": true,
+      "training_seconds": 0.3410794157534838,
+      "peak_allocated_mib": null
+    },
+    "four_camera_exact": {
+      "four_camera_output_exact": true,
+      "four_camera_gradients_exact": true,
+      "four_camera_inference_exact": true,
+      "strict_previous_weights_load": true
+    },
+    "legacy_weights": {
+      "restored_flags_strict_load": true,
+      "basic_rejects_16_channel_weights": true
+    }
+  },
+  "historical_network_protected_files_unchanged": true,
+  "current_protected_files": {
+    "original_module": true,
+    "dataset.py": true,
+    "test.py": true,
+    "train.py": "intentionally adapted under user authorization"
+  },
+  "training_adapter": {
+    "checkpoint": {
+      "epoch": 0,
+      "global_step": 4,
+      "optimizer_updates": 3,
+      "usable_batches": 4,
+      "bounded_smoke": true,
+      "validation_errors": [
+        98.22766012396694,
+        94.63455578512396,
+        89.79532541322314,
+        19.065824508666992,
+        21.652950286865234
+      ],
+      "checkpoint": "checkpoints/OmniDS_stereo_basic_train_smoke/OmniDS_stereo_basic_train_smoke_e0.pth",
+      "num_cams": 2,
+      "use_group_variance": false,
+      "use_dynamic_context": false,
+      "num_depth": 96,
+      "output": [
+        320,
+        480
+      ],
+      "rho_min": 2.220446049250313e-16,
+      "rho_max": 0.6028875138822783,
+      "scheduler_saved": true,
+      "scaler_saved": true
+    },
+    "extra_checks": {
+      "restore_global_step": 5,
+      "restore_epoch": 1,
+      "restore_optimizer_updates": 4,
+      "restored_scheduler_epoch": 4,
+      "zero_validation_handled": true,
+      "fp32_update": true
+    },
+    "geometry_unit": {
+      "single_point_left_distance_correct": true,
+      "single_point_index_correct": true,
+      "zbuffer_nearest": true,
+      "reference_distance": 5.03587125083058,
+      "candidate_index": 31.29051399230957,
+      "output_shape": [
+        1,
+        320,
+        480
+      ],
+      "candidate_last": 0.6028875138822783
+    },
+    "wrong_dynamic_restore_rejected": true
+  }
 }
