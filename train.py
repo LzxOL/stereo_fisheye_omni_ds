@@ -48,6 +48,8 @@ parser.add_argument('--stereo', action='store_true', help='train the two-camera 
 parser.add_argument('--ref_cam', choices=['cam1', 'cam2', 'cam3', 'cam4'])
 parser.add_argument('--target_cam', choices=['cam1', 'cam2', 'cam3', 'cam4'])
 parser.add_argument('--sweep_size', type=int, nargs=2, default=[160, 240], help='stereo working H W; output is 2H 2W')
+parser.add_argument('--reference_grid', choices=['local_erp', 'left_fisheye'], default='local_erp',
+                    help='stereo ray raster: local ERP angles or full left fisheye pixels')
 parser.add_argument('--sweep_azimuth_center_deg', type=float, help='default: infer from actual calibrated overlap')
 parser.add_argument('--sweep_azimuth_span_deg', type=float, default=130.)
 parser.add_argument('--sweep_elevation_min_deg', type=float, default=-45.)
@@ -169,9 +171,12 @@ if args.stereo:
     args.equirect_size = output_size
     if args.val_count < 0 or any(n is not None and n < 1 for n in (args.max_train_steps, args.max_eval_samples)):
         parser.error('Smoke limits must be positive, val_count nonnegative')
+    if args.reference_grid == 'left_fisheye' and args.sweep_azimuth_center_deg is not None:
+        parser.error('A left-fisheye pixel grid has no ERP azimuth centre')
     if args.name == parser.get_default('name'):
         args.name = 'OmniDS_Stereo_Basic'
-elif args.ref_cam or args.target_cam or args.max_train_steps is not None or args.max_eval_samples is not None:
+elif (args.ref_cam or args.target_cam or args.max_train_steps is not None or args.max_eval_samples is not None
+      or args.reference_grid != 'local_erp'):
     parser.error('Camera-pair and bounded-smoke options require --stereo')
 
 if args.cnn_only:
@@ -285,9 +290,10 @@ def train(epoch_total, load_state):
                              angles=[args.sweep_azimuth_center_deg, args.sweep_azimuth_span_deg,
                                      args.sweep_elevation_min_deg, args.sweep_elevation_max_deg],
                              val_count=args.val_count, seed=args.seed, augment=not args.no_augment,
-                             gt_width=args.gt_width, check_occlusion=not args.no_gt_occlusion_check)
-        LOG_INFO('Stereo: left-centred GT, working indices [0,%d], output %s; official test split reserved' %
-                 (args.num_invdepth - 1, data.output_size))
+                             gt_width=args.gt_width, check_occlusion=not args.no_gt_occlusion_check,
+                             reference_grid=args.reference_grid)
+        LOG_INFO('Stereo: %s, left-centred radial GT, working indices [0,%d], output %s; official test split reserved' %
+                 (data.reference_grid, args.num_invdepth - 1, data.output_size))
     elif len(opts.dbname) > 1:
         data = MultiDataset(opts.dbname, opts.data_opts, db_root=opts.db_root)
     else:

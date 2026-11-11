@@ -2,6 +2,9 @@
 
 当前双目默认已进一步简化为 **GWC-only + Static Left Context**，开关和最新验证见文末。四目路径保持原有行为；下文此前阶段的动态 Context/Variance 描述是可恢复的消融路径。
 
+双目现在也支持 `--reference_grid left_fisheye`：左光心＋左鱼眼像素参考网格＋径向逆深度扫描。
+这组输出属于左鱼眼视图，不是 ERP；默认 `local_erp` 路径继续保留，详见文末。
+
 本次是在当前工作树上完整复制 `module/` 得到 `module_cnn_only/`，再做最小改动。
 原 `module/` 及其中原有的未提交阅读注释均保留，已逐文件核对 SHA256 未变化。
 这仍然是**四目、Rig-centered ERP 深度预测**，没有引入之前 PDF-Omni 双目 Baseline 的结构。
@@ -298,3 +301,64 @@ CUDA_VISIBLE_DEVICES=1 python train.py --stereo \
 原 `Dataset.evalError` 也继续复用：它报告以 D 归一化的百分比误差，日志中的 MAE/RMS 不是米；Sequence Loss 则在 `[0,95]` 工作索引单位中计算。这些受限验证证明数据/梯度/更新/恢复接口可执行，不证明网络已收敛。
 
 独立 `test.py`、通用双目可视化和其他数据集尚未适配。训练内部的双目验证已接好，不要使用原四目全景可视化或 Rig GT 测试路径解释双目输出。
+
+## 左鱼眼像素参考网格实验（2026-11-11）
+
+两种模式都以左相机光心为扫描原点，区别只是二维参考射线如何排列：
+
+| 参数 | `local_erp`（上一组） | `left_fisheye`（新一组） |
+|---|---|---|
+| 二维网格 | 均匀经纬角，局部球面窗口 | 在整张左鱼眼上均匀取像素，再由 OCam 反投影 |
+| 径向深度 | 沿左相机单位射线的距离 | 相同，不是 Z 轴深度 |
+| 工作尺寸／候选 | H=160、W=240、D=96 | 相同 |
+| 最终输出 | 320×480 的局部 ERP | 320×480 的左鱼眼像素参考图 |
+| 模型张量的数值 | 连续候选索引 `[0,95]` | 相同；物理逆深度为 `axis[0]+idx*step` |
+
+原始左右输入保持 768×800，CNN 仍输出 384×400；并没有将输入图片变形为
+320×480。新模式只把最终参考格点 `(x,y)` 对应到原图
+`u=x*799/479, v=y*767/319`，再使用原 OCam `pixelToRay` 得到单位射线。
+原图的 invalid-mask、FOV 和双方共同候选有效性仍然生效，图像外角不补成有效射线。
+工作格点取最终格点的 `[::2,::2]`，保持凸上采样的坐标约定；其左右步长按各自图像轴定义，
+不是等角度采样。ERP 的水平130°、垂直±45°窗口不用于这个模式。
+
+左 Grid 使用这些已知原图像素直接计算 CNN 采样坐标，避免 OCam 的 pol/inv_pol
+近似往返误差；它沿 D 广播。右 Grid 用 `P_left=unit_ray/rho`、原 `cam2rig/rig2cam`
+和 `rayToPixel` 逐层构建。GT 仍从完整 Rig TIFF 恢复三维点，变换到左相机后，
+通过左 OCam 投影落到鱼眼参考像素，按径向距离 Z-buffer 选最近表面。
+不会缩放上一组 ERP GT，也不会将逆深度索引乘2；无双目支持的输出由 Mask 标识。
+
+在已有服务器环境中，新一组正式命令为：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python train.py --stereo --reference_grid left_fisheye \
+  --ref_cam cam4 --target_cam cam3 \
+  --db_root /root/lzx_ws/datasets/Omnidirectional_Stereo_Dataset \
+  --dbname omnithings --mixed_precision --batch_size 6 --train_iters 12 \
+  --total_epochs 100 --lr 0.0005 --wdecay 0.00001 \
+  --name omnids_fisheye_b6_20261111
+```
+
+这组从头训练，沿用原来的100轮 OneCycleLR计划，在12轮完成验证和保存后由独立监控
+停止，与上一组策略一致。运行目录 `/cache/training/omnids_fisheye_b6_20261111/` 保存
+启动脚本、参数、源文件哈希、loss 记录、进度和监控状态；不复用 ERP 的权重/optimizer。
+恢复训练时已有严格 metadata 检查会拒绝跨参考网格恢复；旧 ERP metadata 保持原样。
+
+验证命令：
+
+```bash
+python tools/check_stereo_reference_grid.py \
+  --db_root /root/lzx_ws/datasets/Omnidirectional_Stereo_Dataset
+```
+
+实际几何验证通过：单位射线、径向距离、坐标变换正反向、左 Grid 深度不变、
+右 Grid 随深度变化、逐候选有效性以及 Rig 单点到左鱼眼 GT 的位置和距离检查。
+已与修改前代码逐元素比较：旧 ERP Grid、Mask、首帧 GT 和旧 checkpoint metadata
+完全一致。新旧候选轴和训练／验证划分一致。
+
+真实 GT 的12轮AMP训练检查：4批次、3次optimizer更新、1帧验证、checkpoint保存成功，
+峰值已分配显存6124.15 MiB（Batch=1，包含训练／验证）；不是模型精度结论。
+新模式首个真实训练帧有效 GT 覆盖34.19%，左侧有效网格67.62%，至少一个候选双方有效
+的工作像素43.64%。这些是实际标定投影得到的结果，不能把没有双目重叠的区域当成有效深度。
+
+两组原生输出覆盖的射线和像素采样分布不同。比较最终精度时应在共同射线/区域评估，
+不能仅凭各自原生验证 MAE 的高低，就认定某一种参数化更好。

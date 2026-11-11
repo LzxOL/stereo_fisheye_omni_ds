@@ -1456,5 +1456,171 @@
       "candidate_last": 0.6028875138822783
     },
     "wrong_dynamic_restore_rejected": true
+  },
+  "left_fisheye_reference_grid": {
+    "date": "2026-11-11",
+    "geometry": {
+      "reference_grid": "left_fisheye",
+      "grid_shapes": [
+        [
+          160,
+          240,
+          96,
+          2
+        ],
+        [
+          160,
+          240,
+          96,
+          2
+        ]
+      ],
+      "candidate_mask_shape": [
+        1,
+        96,
+        160,
+        240
+      ],
+      "unit_rays": true,
+      "radial_depth": true,
+      "transform_roundtrip": true,
+      "left_depth_invariant": true,
+      "target_projection": true,
+      "target_depth_dependent": true,
+      "single_point_gt_pixel": [
+        163,
+        51
+      ],
+      "single_point_gt_depth": 8.022468448052631,
+      "single_point_gt_index": 19.64171015695916,
+      "left_valid_fraction": 0.6762239583333334,
+      "any_match_fraction": 0.43635416666666665,
+      "candidate_valid_fraction": 0.39628607855902775,
+      "first_real_gt_shape": [
+        320,
+        480
+      ],
+      "first_real_gt_valid_fraction": 0.341875,
+      "first_real_gt_index_range": [
+        3.4297475814819336,
+        69.06494140625
+      ]
+    },
+    "old_erp_regression": {
+      "old_erp_grids_exact": true,
+      "old_erp_masks_exact": true,
+      "old_erp_gt_exact": true,
+      "old_erp_checkpoint_metadata_exact": true,
+      "new_grid_checkpoint_incompatible": true,
+      "candidate_axis_identical": true,
+      "split_identical": true,
+      "old_run_completed_epochs": 12,
+      "old_final_validation": [
+        27.26001018305996,
+        14.151969656601016,
+        10.612820551027943,
+        2.9751029913313687,
+        8.326592545723543
+      ]
+    },
+    "real_gt_amp12_batch1_smoke": {
+      "start_time": 1794372933.6245272,
+      "batches": 4,
+      "optimizer_updates": 3,
+      "loss": 93.08177947998047,
+      "elapsed_seconds": 18.248182773590088,
+      "peak_allocated_mib": 6124.14794921875,
+      "peak_reserved_mib": 6284.0
+    },
+    "real_gt_amp12_batch6_probe": {
+      "start_time": 1794373104.8705196,
+      "batches": 3,
+      "optimizer_updates": 2,
+      "loss": 127.0925521850586,
+      "elapsed_seconds": 33.505765438079834,
+      "peak_allocated_mib": 28243.0361328125,
+      "peak_reserved_mib": 30180.0
+    },
+    "batch6_probe_checkpoint_validated": true,
+    "checkpoint_geometry": "left_fisheye",
+    "formal_run": {
+      "commit": "b5d58275e81df36cd1fc57187217b748d24b8897",
+      "gpu_index": 2,
+      "gpu_uuid": "GPU-5cff85b7-1bab-5560-bdad-ab3378fa069c",
+      "epochs": 100,
+      "batch_size": 6,
+      "train_iters": 12,
+      "lr": 0.0005,
+      "weight_decay": 1e-05,
+      "optimizer": "AdamW",
+      "scheduler": "original OneCycleLR",
+      "mixed_precision": true,
+      "use_group_variance": false,
+      "use_dynamic_context": false,
+      "working_dhw": [
+        96,
+        160,
+        240
+      ],
+      "output_hw": [
+        320,
+        480
+      ],
+      "reference": "cam4",
+      "target": "cam3",
+      "training_count": 8704,
+      "validation_count": 512,
+      "checkpoints": "/workspace/stereo_fisheye_omni_ds/checkpoints/omnids_fisheye_b6_20261111",
+      "code_changes": "none; external wrapper records metrics without changing loss or updates",
+      "reference_grid": "left_fisheye",
+      "target_completed_epochs": 12,
+      "seed": 0,
+      "angles": null,
+      "reference_pixel_bounds": [
+        0,
+        799,
+        0,
+        767
+      ],
+      "initialized_from": "random seed 0; no ERP weights or optimizer loaded",
+      "source_changes": "dataset_stereo ray/GT raster branch and train.py CLI only; model unchanged",
+      "source_sha256": {
+        "dataset_stereo.py": "db5873d79b9c3abe94d597ab3cd4678acf1c8a299402453c5cf862bc3dd0d98b",
+        "train.py": "dc437469b114018ba745fa00d98bdca8c3a4b9be1006bcbb401641550886bf51",
+        "module_cnn_only/network.py": "6862394d486acb12a057159b93b2880110d60b007761121ccb4afbefc043ffac",
+        "module_cnn_only/similarity_context.py": "b26c609934d414ae6e3efe40b3999666b9fa2200479d33c85283e89d726869e1",
+        "tools/watch_training_epochs.py": "388f3593da21f3fa5e83a0bab02c43e94fa454d64038c05a9fc5454d43cccfc3",
+        "tools/check_stereo_reference_grid.py": "78f502ca64289588a1a1e6de5efe33ada9d98980354ac3d83c4949b65165d54e"
+      },
+      "previous_run": "omnids_basic_b6_20261110",
+      "comparison_scope": "Native output regions differ; use common rays/region for accuracy comparison",
+      "geometry_summary": {
+        "reference": "cam4",
+        "target": "cam3",
+        "image_size": [
+          768,
+          800
+        ],
+        "sweep_size": [
+          160,
+          240
+        ],
+        "output_size": [
+          320,
+          480
+        ],
+        "angles": null,
+        "reference_grid": "left_fisheye",
+        "reference_pixel_bounds": [
+          0,
+          799,
+          0,
+          767
+        ],
+        "grid_convention": "full_left_fisheye_pixels_output_linspace_strided_2_CNN_stride2_centres",
+        "index_units": "continuous_working_candidate_0_to_D_minus_1"
+      },
+      "geometry_record": "/cache/training/omnids_fisheye_b6_20261111/config.json"
+    }
   }
 }

@@ -29,8 +29,27 @@ def local_rays(size, angles):
     return rays.reshape(3, -1)
 
 
-def project_camera(camera, points):
-    pixels = camera.rayToPixel(points)
+def fisheye_reference_rays(camera, size):
+    """左鱼眼像素均匀取样，再由原 OCam 反投影成单位射线。
+
+    返回 rays=[3,H*W]、原图 pixels=[2,H*W]。必须归一化 OCam 的
+    非单位射线，后续 rays/rho 才表示径向距离，而不是 Z 轴深度。
+    图像仍是原始 768x800；这里仅定义网络输出像素对应哪条原图射线。
+    """
+    h, w = size
+    u, v = np.meshgrid(np.linspace(0, camera.width - 1, w),
+                       np.linspace(0, camera.height - 1, h))
+    pixels = np.stack([u, v]).reshape(2, -1)
+    rays = camera.pixelToRay(pixels)
+    length = np.linalg.norm(rays, axis=0)
+    valid = np.isfinite(rays).all(0) & (length > 0)
+    rays = np.where(valid[None], rays / np.where(valid, length, 1)[None], 0.)
+    return rays, pixels, valid
+
+
+def project_camera(camera, points, pixels=None):
+    if pixels is None:
+        pixels = camera.rayToPixel(points)
     u, v = pixels
     valid = np.isfinite(points).all(0) & (np.linalg.norm(points, axis=0) > 0)
     valid &= np.isfinite(pixels).all(0) & (u >= 0) & (u <= camera.width - 1) & (v >= 0) & (v <= camera.height - 1)
@@ -102,7 +121,8 @@ def cloud_visibility(camera, points, abs_tolerance=.01, rel_tolerance=.01):
 
 
 def rig_gt_to_reference(invdepth, gt_phi, reference, target, axis, size, angles,
-                        check_occlusion=True, occlusion_abs=.01, occlusion_rel=.01):
+                        check_occlusion=True, occlusion_abs=.01, occlusion_rel=.01,
+                        reference_grid='local_erp'):
     from dataset import makeSphericalRays
     if not isinstance(invdepth, np.ndarray) or invdepth.ndim != 2:
         raise ValueError("GT TIFF must contain a complete 2D inverse-depth image")
@@ -120,16 +140,25 @@ def rig_gt_to_reference(invdepth, gt_phi, reference, target, axis, size, angles,
         ref_visible &= cloud_visibility(reference, ref_points, occlusion_abs, occlusion_rel)
         target_visible &= cloud_visibility(target, target_points, occlusion_abs, occlusion_rel)
 
-    center, span, emin, emax = angles
-    safe_distance = np.maximum(distances, np.finfo(np.float64).tiny)
-    az = np.rad2deg(np.arctan2(ref_points[0], ref_points[2]))
-    az = (az - center + 180) % 360 - 180
-    el = np.rad2deg(np.arcsin(np.clip(-ref_points[1] / safe_distance, -1, 1)))
     h, w = size
-    x = (az / span + .5) * (w - 1)
-    y = (emax - el) / (emax - emin) * (h - 1)
     inside = ref_visible & np.isfinite(distances) & (distances > 0)
-    inside &= (np.abs(az) <= span / 2) & (el >= emin) & (el <= emax)
+    if reference_grid == 'left_fisheye':
+        # 三维点先投影到左鱼眼原图，再落到输出像素网格；不是缩放 Rig GT。
+        # 距离仍取 ||P_left||，不将鱼眼图像坐标误当成针孔 Z 深度。
+        x = ref_pixels[0] / (reference.width - 1) * (w - 1)
+        y = ref_pixels[1] / (reference.height - 1) * (h - 1)
+        inside &= np.isfinite(x) & np.isfinite(y) & (x >= 0) & (x <= w - 1) & (y >= 0) & (y <= h - 1)
+    elif reference_grid == 'local_erp':
+        center, span, emin, emax = angles
+        safe_distance = np.maximum(distances, np.finfo(np.float64).tiny)
+        az = np.rad2deg(np.arctan2(ref_points[0], ref_points[2]))
+        az = (az - center + 180) % 360 - 180
+        el = np.rad2deg(np.arcsin(np.clip(-ref_points[1] / safe_distance, -1, 1)))
+        x = (az / span + .5) * (w - 1)
+        y = (emax - el) / (emax - emin) * (h - 1)
+        inside &= (np.abs(az) <= span / 2) & (el >= emin) & (el <= emax)
+    else:
+        raise ValueError('reference_grid must be local_erp or left_fisheye')
     candidates = np.flatnonzero(inside)
     pixel_ids = np.rint(y[candidates]).astype(int) * w + np.rint(x[candidates]).astype(int)
     winner = zbuffer_indices(pixel_ids, distances[candidates], h * w)
@@ -154,7 +183,8 @@ class StereoDataset(Dataset):
     """
     def __init__(self, dbname, db_opts, db_root, ref_cam, target_cam,
                  sweep_size=(160, 240), angles=(None, 130., -45., 45.),
-                 val_count=512, seed=0, augment=True, gt_width=None, check_occlusion=True):
+                 val_count=512, seed=0, augment=True, gt_width=None, check_occlusion=True,
+                 reference_grid='local_erp'):
         if dbname != 'omnithings':
             raise ValueError('The stereo adapter currently supports OmniThings only')
         super().__init__(dbname, Edict(use_rgb=db_opts.use_rgb), load_lut=False,
@@ -179,14 +209,29 @@ class StereoDataset(Dataset):
         self.min_invdepth, self.max_invdepth = float(self.axis[0]), float(self.axis[-1])
         self.sample_step_invdepth = float(self.axis[1] - self.axis[0])
         self.invdepths = self.axis
-        inferred = estimate_angles(self.reference, self.target, self.axis) if any(v is None for v in angles) else angles
-        self.angles = [float(inferred[i] if v is None else v) for i, v in enumerate(angles)]
+        if reference_grid not in ('local_erp', 'left_fisheye'):
+            raise ValueError('reference_grid must be local_erp or left_fisheye')
+        self.reference_grid = reference_grid
+        if reference_grid == 'local_erp':
+            inferred = estimate_angles(self.reference, self.target, self.axis) if any(v is None for v in angles) else angles
+            self.angles = [float(inferred[i] if v is None else v) for i, v in enumerate(angles)]
+        else:
+            self.angles = None  # 鱼眼参考网格没有 ERP 的经纬角裁剪窗口。
         self.equirect_size = list(self.output_size)
         # Work-grid centres correspond to output pixels (2*y, 2*x); do not build
         # a second linspace with shifted endpoint geometry.
         h, w = self.sweep_size
-        rays = local_rays(self.output_size, self.angles).reshape(3, *self.output_size)[:, ::2, ::2].reshape(3, -1)
-        pixels, visible = project_camera(self.reference, rays)
+        if reference_grid == 'left_fisheye':
+            rays, pixels, visible = fisheye_reference_rays(self.reference, self.output_size)
+            rays = rays.reshape(3, *self.output_size)[:, ::2, ::2].reshape(3, -1)
+            pixels = pixels.reshape(2, *self.output_size)[:, ::2, ::2].reshape(2, -1)
+            visible = visible.reshape(self.output_size)[::2, ::2].reshape(-1)
+            # 左侧用已知原图像素位置直接采样，避免 pol/inv_pol 近似往返偏差。
+            _, projection_valid = project_camera(self.reference, rays, pixels=pixels)
+            visible &= projection_valid
+        else:
+            rays = local_rays(self.output_size, self.angles).reshape(3, *self.output_size)[:, ::2, ::2].reshape(3, -1)
+            pixels, visible = project_camera(self.reference, rays)
         left, visible = feature_grid(self.reference, pixels, visible)
         left = left.reshape(h, w, 1, 2)
         self.left_valid_mask = visible.reshape(1, h, w)
@@ -202,7 +247,7 @@ class StereoDataset(Dataset):
         self.grids = [np.broadcast_to(left, (h, w, depth_count, 2)), right]
         self.candidate_valid = candidates[None]
         if not candidates.any():
-            raise ValueError('No jointly valid stereo candidates in the selected angular window')
+            raise ValueError('No jointly valid stereo candidates in the reference grid')
         official_train, official_test = list(self.train_idx), list(self.test_idx)
         if not 0 <= val_count < len(official_train):
             raise ValueError('val_count must leave at least one official training frame')
@@ -226,6 +271,11 @@ class StereoDataset(Dataset):
                              occlusion_scope='observed_Rig_point_cloud_only', use_rgb=self.use_rgb,
                              validation_frames=self.test_idx, split_seed=seed,
                              official_train_count=len(official_train), official_test_count=len(official_test))
+        if reference_grid == 'left_fisheye':
+            # 新旧坐标不能混用 checkpoint；旧 ERP metadata 原样保留以兼容恢复。
+            self.metadata.update(reference_grid='left_fisheye',
+                                 reference_pixel_bounds=[0, self.reference.width - 1, 0, self.reference.height - 1],
+                                 grid_convention='full_left_fisheye_pixels_output_linspace_strided_2_CNN_stride2_centres')
 
     def __len__(self):
         return len(self.train_idx)
@@ -269,7 +319,7 @@ class StereoDataset(Dataset):
             raise ValueError(f'Expected a complete 2D inverse-depth TIFF: {path}')
         index, valid, _ = rig_gt_to_reference(raw, self.gt_phi, self.reference, self.target,
                                              self.axis, self.output_size, self.angles,
-                                             self.check_occlusion)
+                                             self.check_occlusion, reference_grid=self.reference_grid)
         index, valid = index[0], valid[0]
         floor = np.floor(index).astype(int).clip(0, self.num_invdepth - 1)
         ceil = np.ceil(index).astype(int).clip(0, self.num_invdepth - 1)
