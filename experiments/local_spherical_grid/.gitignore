@@ -1,0 +1,6 @@
+# 实验生成物和数据快照保留在本地，不随几何代码上传。
+outputs/
+outputs_*/
+__pycache__/
+*.pyc
+.DS_Store
