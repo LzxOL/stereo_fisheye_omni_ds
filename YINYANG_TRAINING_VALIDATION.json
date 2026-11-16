@@ -1,0 +1,175 @@
+{
+  "status": "PASS",
+  "date": "2026-11-17",
+  "scope": "OmniThings real GT; full frozen Yin50 charts; official DA-V2 vitb; original train.py adaptation",
+  "local_smoke": {
+    "status": "PASS",
+    "predictions": [
+      [
+        1,
+        1,
+        8,
+        16
+      ],
+      [
+        1,
+        1,
+        8,
+        16
+      ],
+      [
+        1,
+        1,
+        8,
+        16
+      ]
+    ],
+    "loss": 5.649608612060547,
+    "valid_fraction": 0.7109375,
+    "constant_index_preserved": true,
+    "no_half_pixel_shift": true,
+    "empty_mask_zero": true,
+    "gradient_to_both_images": true,
+    "checkpoint_equivalence": true,
+    "gru_checkpoint_output_and_gradient_equivalence": true,
+    "strict_reload": true
+  },
+  "prior_pipeline_regression": "PASS",
+  "geometry": {
+    "reference": "cam4",
+    "target": "cam3",
+    "num_depth": 96,
+    "yin_padded": [
+      136,
+      216
+    ],
+    "yang_padded": [
+      128,
+      328
+    ],
+    "output": [
+      320,
+      480
+    ],
+    "candidates": "strict array equality with StereoDataset",
+    "calibration": "strict camera/config/cache SHA checks",
+    "gt": "complete Rig inverse-depth TIFF -> point cloud -> left camera radial GT -> z-buffer; no GT resizing"
+  },
+  "profiles": [
+    {
+      "batch_size": 1,
+      "checkpointing": "local refiner only",
+      "optimizer_updates": 3,
+      "losses": [
+        18.729610443115234,
+        20.456226348876953,
+        14.773042678833008
+      ],
+      "steady_step_seconds": [
+        1.2047789096832275,
+        1.1437311172485352
+      ],
+      "peak_allocated_mib": 13397.2451171875,
+      "peak_reserved_mib": 13612.0
+    },
+    {
+      "batch_size": 2,
+      "checkpointing": "local refiner only",
+      "status": "OOM within shared-GPU 55% allocator budget"
+    },
+    {
+      "batch_size": 2,
+      "checkpointing": "local refiner and stateless update convolutions",
+      "optimizer_updates": 3,
+      "losses": [
+        18.18115234375,
+        23.140737533569336,
+        6.717973232269287
+      ],
+      "steady_step_seconds": [
+        1.945875883102417,
+        1.9218688011169434
+      ],
+      "peak_allocated_mib": 17376.845703125,
+      "peak_reserved_mib": 17578.0
+    },
+    {
+      "batch_size": 3,
+      "checkpointing": "local refiner and stateless update convolutions",
+      "status": "OOM within shared-GPU 55% allocator budget"
+    }
+  ],
+  "resume": {
+    "status": "PASS",
+    "start_epoch_zero_based": 1,
+    "optimizer_updates_before": 3,
+    "optimizer_updates_after": 4,
+    "lr_before": 2.110294117647059e-05,
+    "lr_after": 2.147058823529412e-05,
+    "amp_scale": 128.0,
+    "peak_allocated_mib": 17390.546875,
+    "peak_reserved_mib": 17594.0
+  },
+  "real_checkpoint_verification": {
+    "strict_reload": true,
+    "optimizer_updates": 3,
+    "frozen_parameters": 86580480,
+    "backbone_unchanged_from_e27": true,
+    "optimizer_moment_l1": {
+      "encoder.": 14.168444848682725,
+      "enhancer.geometry_encoder.": 0.00010017442338039473,
+      "enhancer.local_refiner.": 1.589207221516972,
+      "fusion.": 0.0213766557217987,
+      "geometry_fusion.": 0.9872093028388917,
+      "dav2_geometry.projections.": 3.3670829950715415,
+      "dav2_geometry.fuse.": 2.7501362822949886,
+      "dav2_geometry.refine.": 0.8548904014751315,
+      "update_block.": 27.785100417386275
+    },
+    "validation_two_frames": [
+      22.769181511312837,
+      13.155045765453174,
+      9.254562345349772,
+      2.077616810798645,
+      6.1722681522369385
+    ]
+  },
+  "metric_caveat": "Only two validation frames; tests establish trainability, not improved accuracy",
+  "selected_run": {
+    "name": "omnids_dav2_yinyang_30ep_20261117",
+    "epochs": 30,
+    "batch_size": 2,
+    "gpu": 0,
+    "mixed_precision": true,
+    "gradient_checkpointing": true,
+    "gpu_memory_fraction": 0.55,
+    "num_workers": 4,
+    "initialization": "DA-V2 context e27.pth; new optimizer and scheduler; original stereo weights explicitly inherited",
+    "container": "stereo-fisheye-omni-ds-dev",
+    "code_directory": "/root/lzx_ws/project/stereo_fisheye_omni_ds_yinyang_20261117",
+    "real_training_start": {
+      "status": "RUNNING",
+      "started_at": "2026-11-17T01:05:47+08:00",
+      "verified_at": "2026-11-17T01:07:43+08:00",
+      "epoch": 1,
+      "step": 13,
+      "steps_per_epoch": 4352,
+      "optimizer_updates": 13,
+      "tmux_session": "yinyang-dav2-30ep",
+      "pid": 49883,
+      "initial_loss": 18.177,
+      "latest_loss": 17.05413818359375,
+      "mean_loss": 14.396900177001953,
+      "step_seconds": 1.9146485328674316,
+      "peak_allocated_mib": 17376.845703125,
+      "peak_reserved_mib": 17578.0
+    }
+  },
+  "single_grid_regression": {
+    "status": "PASS",
+    "context_fixed": true,
+    "hidden_updated": true,
+    "similarity_and_gev_lookup_each_iteration": true,
+    "masks_and_constant_index_upsampling": true
+  }
+}

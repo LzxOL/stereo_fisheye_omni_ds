@@ -4,6 +4,8 @@
 from __future__ import print_function, division
 
 import time
+import csv
+import json
 from argparse import ArgumentParser
 # CNN-ONLY: wandb is optional; import it only when logging is requested.
 
@@ -66,6 +68,14 @@ parser.add_argument('--no_augment', action='store_true', help='disable stereo sh
 parser.add_argument('--no_gt_occlusion_check', action='store_true', help='disable observed-point-cloud visibility checks')
 parser.add_argument('--max_train_steps', type=int, help='stereo bounded smoke run; stop after this many training batches')
 parser.add_argument('--max_eval_samples', type=int, help='stereo bounded validation sample count')
+parser.add_argument('--use_yinyang', action='store_true', help='use the calibrated Yin/Yang frontend and existing DA-V2/GRU backbone')
+parser.add_argument('--yinyang_cache', help='frozen grid_v1_geometry prefix, without .npz suffix')
+parser.add_argument('--gradient_checkpointing', action='store_true', help='recompute local refiner and stateless GRU update convolutions during backward')
+parser.add_argument('--no_gradient_checkpointing', dest='gradient_checkpointing', action='store_false', help='store refiner activations for faster backward when memory permits')
+parser.add_argument('--gpu_memory_fraction', type=float, help='optional allocator budget on a GPU shared with other jobs')
+parser.add_argument('--num_workers', type=int, default=0, help='parallel image and left-centred GT loading')
+parser.add_argument('--log_every', type=int, default=20, help='stereo loss / throughput logging interval')
+parser.add_argument('--amp_init_scale', type=float, default=65536., help='initial AMP gradient scaling; not a learning-rate change')
 
 parser.add_argument('--name', default='ROmniStereo_BEV', help="name of your experiment")
 parser.add_argument('--restore_ckpt', help="restore checkpoint")
@@ -155,6 +165,8 @@ parser.add_argument('--wdecay', type=float, default=.00001, help="Weight decay i
 parser.add_argument('--wandb', action='store_true', help='log training to wandb')
     
 args = parser.parse_args()
+if args.restore_ckpt and args.pretrain_ckpt:
+    parser.error('Use --restore_ckpt to resume OR --pretrain_ckpt to initialize a new run')
 
 if args.stereo:
     args.cnn_only = True
@@ -187,6 +199,8 @@ if args.use_dav2_geometry:
     if not args.stereo or args.dav2_input_size < 14:
         parser.error('--use_dav2_geometry requires --stereo and dav2_input_size>=14')
     from module_cnn_only.dav2_geometry import prepare_dav2_rgb
+if args.use_yinyang and (not args.stereo or args.reference_grid != 'left_fisheye' or not args.yinyang_cache):
+    parser.error('--use_yinyang requires --stereo --reference_grid left_fisheye --yinyang_cache PREFIX')
 
 if args.cnn_only and not args.stereo:
     parser.error('--cnn_only uses stereo static context; add --stereo and camera pair, or use original four-camera OmniDS without --cnn_only')
@@ -235,6 +249,10 @@ if args.stereo:
     opts.net_opts.use_group_variance = args.use_group_variance
     opts.net_opts.reference_grid = args.reference_grid
     opts.net_opts.use_dav2_geometry = args.use_dav2_geometry
+    opts.net_opts.use_yinyang = args.use_yinyang
+    opts.net_opts.training_geometry = args.use_yinyang
+    opts.net_opts.yinyang_output = 'left_fisheye' if args.use_yinyang else 'native'
+    opts.net_opts.gradient_checkpointing = args.gradient_checkpointing
     if args.use_dav2_geometry:
         opts.net_opts.dav2_fusion_target = 'context'
         opts.net_opts.dav2_model_repo = args.dav2_model_repo
@@ -299,7 +317,9 @@ def fetch_optimizer(model, num_steps):
 
 
 def train(epoch_total, load_state):
-    if args.use_dav2_geometry and not load_state and osp.isdir(opts.model_dir):
+    if args.gpu_memory_fraction is not None:
+        torch.cuda.set_per_process_memory_fraction(args.gpu_memory_fraction)
+    if args.use_dav2_geometry and not opts.snapshot_path and osp.isdir(opts.model_dir):
         if any(name.endswith('.pth') for name in os.listdir(opts.model_dir)):
             raise ValueError('DA-V2 run already has checkpoints; choose a new --name or explicitly restore')
     if args.stereo:
@@ -319,10 +339,27 @@ def train(epoch_total, load_state):
         data = MultiDataset(opts.dbname, opts.data_opts, db_root=opts.db_root)
     else:
         data = Dataset(opts.dbname[0], opts.data_opts, db_root=opts.db_root)
+    package = None
+    if args.use_yinyang:
+        from experiments.local_spherical_grid.adaptive_local_grid_v1 import AdaptiveLocalSphericalGrid, calibration_hash, load_config
+        package = AdaptiveLocalSphericalGrid.load(args.yinyang_cache,
+                    expected_calibration_hash=calibration_hash(data.reference, data.target), expected_config=load_config())
+        if not np.array_equal(package.metadata['inverse_depth_candidates'], data.axis):
+            raise ValueError('Frozen grid and dataset must use exactly the same inverse-depth candidates')
+        if tuple(package.reference['left_valid'].shape) != tuple(data.output_size):
+            raise ValueError('Frozen grid reference output size differs from the left-fisheye GT grid')
+        data.output_candidate_valid = package.reference['stereo_valid']
+        data.metadata['yinyang'] = dict(geometry=package.metadata,
+                                      chart_shapes={n: list(getattr(package, n).shape) for n in ('yin', 'yang')},
+                                      output_projection='ray_correspondence_strict_bilinear_Q_weighted_overlap')
+        LOG_INFO('Yin/Yang native charts: %s; predictions projected by rays onto left GT %s' %
+                 (data.metadata['yinyang']['chart_shapes'], data.output_size))
     dbloader = torch.utils.data.DataLoader(data, batch_size=opts.batch_size,
                                            pin_memory=True, shuffle=True,
-                                           num_workers=0, drop_last=True)
-    total_num_steps = len(data)*opts.total_epochs//opts.batch_size
+                                           num_workers=args.num_workers, drop_last=True,
+                                           persistent_workers=args.num_workers > 0,
+                                           multiprocessing_context='spawn' if args.num_workers else None)
+    total_num_steps = len(dbloader)*opts.total_epochs
 
     LOG_INFO("Using stereo CNN baseline: static context, group_variance=%s" %
              args.use_group_variance if args.stereo else
@@ -332,7 +369,8 @@ def train(epoch_total, load_state):
         LOG_INFO(f"  DINO model: {opts.net_opts.dino_model}, freeze: {opts.net_opts.freeze_dino}")
     LOG_INFO(f"  GEV groups: {opts.net_opts.gev_num_groups}, reg_channels: {opts.net_opts.gev_reg_channels}")
     LOG_INFO(f"  GEV pyramid: {opts.net_opts.gev_num_pyramid_levels} levels, radius {opts.net_opts.gev_radius}")
-    net = nn.DataParallel(OmniDS(opts.net_opts)).cuda()
+    model = OmniDS(opts.net_opts, grid_package=package) if args.use_yinyang else OmniDS(opts.net_opts)
+    net = nn.DataParallel(model).cuda()
     if args.use_dav2_geometry:
         LOG_INFO('DA-V2: frozen ViT-B blocks [2,5,8,11], trainable Context fusion before context/state heads; GEV unchanged')
     if opts.net_opts.fix_bn:
@@ -340,7 +378,7 @@ def train(epoch_total, load_state):
     LOG_INFO("Parameter Count: %d" % count_parameters(net))
 
     optimizer, scheduler = fetch_optimizer(net, total_num_steps)
-    scaler = GradScaler(enabled=opts.net_opts.mixed_precision)
+    scaler = GradScaler(enabled=opts.net_opts.mixed_precision, init_scale=args.amp_init_scale)
 
     start_epoch = 0
     optimizer_updates = 0
@@ -354,15 +392,15 @@ def train(epoch_total, load_state):
 
     if load_state:
         if opts.snapshot_path and osp.exists(opts.snapshot_path):
-            snapshot = (torch.load(opts.snapshot_path, weights_only=False) if args.cnn_only
+            snapshot = (torch.load(opts.snapshot_path, weights_only=False, map_location='cpu') if args.cnn_only
                         else torch.load(opts.snapshot_path))
             if args.cnn_only and not snapshot.get('net_opts', {}).get('cnn_only', False):
                 raise ValueError('CNN-only requires a CNN-only checkpoint; original DINO checkpoints are incompatible')
             if args.stereo and snapshot.get('stereo_geometry') != data.metadata:
                 raise ValueError('Restore checkpoint stereo geometry differs; do not mix camera pairs/candidate axes')
             if args.stereo:
-                for key in ('use_group_variance',):
-                    if snapshot['net_opts'].get(key) != opts.net_opts[key]:
+                for key in ('use_group_variance', 'use_yinyang'):
+                    if snapshot['net_opts'].get(key, False) != opts.net_opts[key]:
                         raise ValueError(f'Restore checkpoint {key} differs; pass the matching ablation switch')
                 if snapshot['net_opts'].get('use_dav2_geometry', False) != args.use_dav2_geometry:
                     raise ValueError('Restore checkpoint DA-V2 geometry mode differs; weights load strictly')
@@ -392,7 +430,7 @@ def train(epoch_total, load_state):
             sys.exit('%s do not exsits' % (opts.snapshot_path))
 
         if opts.pretrain_path and osp.exists(opts.pretrain_path):
-            snapshot = (torch.load(opts.pretrain_path, weights_only=False) if args.cnn_only
+            snapshot = (torch.load(opts.pretrain_path, weights_only=False, map_location='cpu') if args.cnn_only
                         else torch.load(opts.pretrain_path))
             if args.cnn_only and not snapshot.get('net_opts', {}).get('cnn_only', False):
                 raise ValueError('CNN-only requires a CNN-only checkpoint; original DINO checkpoints are incompatible')
@@ -412,9 +450,9 @@ def train(epoch_total, load_state):
         elif opts.snapshot_path is None:
             sys.exit('%s do not exsits' % (opts.snapshot_path))
 
-    grids = [torch.tensor(grid, requires_grad=False).cuda() for grid in data.grids]
+    grids = None if args.use_yinyang else [torch.tensor(grid, requires_grad=False).cuda() for grid in data.grids]
     candidate_mask = left_mask = None
-    if args.stereo:
+    if args.stereo and not args.use_yinyang:
         candidate_mask = torch.tensor(data.candidate_valid, dtype=torch.bool).cuda()[None]
         left_mask = torch.tensor(data.left_valid_mask, dtype=torch.bool).cuda()[None]
     if not osp.exists(opts.model_dir):
@@ -424,8 +462,29 @@ def train(epoch_total, load_state):
     if resume_step is not None:
         total_iters = resume_step
     stop_training = False
+    if args.stereo:
+        with open(osp.join(opts.model_dir, 'run_config.json'), 'w') as handle:
+            json.dump(dict(arguments=vars(args), geometry=data.metadata, net_opts=dict(net.module.opts)), handle, indent=2)
+        step_fields = ['epoch', 'step', 'loss', 'mean_loss', 'lr', 'optimizer_updates', 'amp_scale',
+                       'batch_size', 'step_seconds', 'valid_ratio', 'final_index_mae', 'peak_allocated_mib', 'peak_reserved_mib']
+        metrics_path = osp.join(opts.model_dir, 'steps.csv')
+        if not osp.exists(metrics_path):
+            with open(metrics_path, 'w', newline='') as handle:
+                csv.DictWriter(handle, fieldnames=step_fields).writeheader()
+
+    def stereo_forward(images, raw, training):
+        # 复用同一入口；双网格内部扫描和跨网格融合后仍走已训练的DA-V2 Context / 原GRU。
+        rgb = (prepare_dav2_rgb(raw, args.dav2_model_repo, args.dav2_input_size).cuda()
+               if args.use_dav2_geometry else None)
+        batch = images[0].shape[0]
+        return net.module(images, grids, iters=opts.train_iters, test_mode=not training, dav2_rgb=rgb,
+                          valid_mask=None if args.use_yinyang else candidate_mask.expand(batch, -1, -1, -1, -1),
+                          left_valid_mask=None if args.use_yinyang else left_mask.expand(batch, -1, -1, -1))
 
     for epoch in range(start_epoch, epoch_total):
+        epoch_start = time.time()
+        if args.stereo:
+            torch.cuda.reset_peak_memory_stats()
         # training
         net.train()
         train_loss = 0
@@ -452,16 +511,19 @@ def train(epoch_total, load_state):
             # Pass ocams for principal point bias (if available)
             ocams = getattr(data, 'ocams', None)
             if args.stereo:
-                batch = imgs[0].shape[0]
-                dav2_rgb = (prepare_dav2_rgb(raw_imgs[0], args.dav2_model_repo, args.dav2_input_size).cuda()
-                            if args.use_dav2_geometry else None)
-                predictions = net.module.forward(imgs, grids, iters=opts.train_iters,
-                                                  valid_mask=candidate_mask.expand(batch, -1, -1, -1, -1),
-                                                  left_valid_mask=left_mask.expand(batch, -1, -1, -1), dav2_rgb=dav2_rgb)
+                predictions = stereo_forward(imgs, raw_imgs[0], True)
+                if args.use_yinyang:
+                    valid = valid.bool() & net.module.output_valid[:, 0]
+                    if not valid.any():
+                        raise ValueError('No overlap between projected dual-chart predictions and left GT')
             elif args.cnn_only:
                 predictions = net.module.forward(imgs, grids, iters=opts.train_iters, ocams=ocams)
             else:
                 predictions = net.module.forward(imgs, grids, ocams=ocams)
+
+            if args.use_yinyang and step == 0:
+                LOG_INFO('Actual tensors: %s; left prediction %s' %
+                         (net.module.debug_outputs, list(predictions[-1].shape)))
 
             loss = sequence_loss(predictions, gt.unsqueeze(1), valid.unsqueeze(1))
             
@@ -472,12 +534,8 @@ def train(epoch_total, load_state):
 
             epoch_loss = train_loss / (usable_batches if args.stereo else step + 1)
 
-            if step % 200 == 0:
-                if args.stereo:
-                    LOG_INFO('Step %d training loss = %.3f, epoch mean = %.3f, forward time = %.2f' %
-                             (total_iters, float(loss.detach()), float(epoch_loss), time.time() - start_time))
-                else:
-                    LOG_INFO("Iter %d/%d training loss = %.3f, average training loss for every step = %.3f, time = %.2f" % (total_iters - epoch*len(data),len(data), loss, epoch_loss, time.time() - start_time))
+            if step % 200 == 0 and not args.stereo:
+                LOG_INFO("Iter %d/%d training loss = %.3f, average training loss for every step = %.3f, time = %.2f" % (total_iters - epoch*len(data),len(data), loss, epoch_loss, time.time() - start_time))
             # writer.add_scalar("train/loss", loss, total_iters)
 
             scaler.scale(loss).backward()
@@ -497,6 +555,23 @@ def train(epoch_total, load_state):
                 scaler.update()
 
             total_iters += 1
+            if args.stereo:
+                # .item同步GPU后才计时，包含前向、反向和优化器更新；CSV可实时监控。
+                loss_value = loss.item()
+                index_mae = (predictions[-1][:, 0] - gt).abs()[valid.bool()].mean().item()
+                record = dict(epoch=epoch + 1, step=total_iters, loss=loss_value, mean_loss=float(epoch_loss),
+                              lr=scheduler.get_last_lr()[0], optimizer_updates=optimizer_updates,
+                              amp_scale=scaler.get_scale(), batch_size=imgs[0].shape[0],
+                              step_seconds=time.time() - start_time, valid_ratio=valid.float().mean().item(),
+                              final_index_mae=index_mae, peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,
+                              peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20)
+                with open(metrics_path, 'a', newline='') as handle:
+                    csv.DictWriter(handle, fieldnames=step_fields).writerow(record)
+                if step % args.log_every == 0:
+                    LOG_INFO('Epoch %d/%d step %d/%d loss %.4f mean %.4f index-MAE %.3f valid %.1f%% %.2fs/batch; peak %.0f MiB; updates %d scale %.0f' %
+                             (epoch + 1, epoch_total, step + 1, len(dbloader), loss_value, epoch_loss, index_mae,
+                              100*record['valid_ratio'], record['step_seconds'], record['peak_allocated_mib'],
+                              optimizer_updates, scaler.get_scale()))
 
             if args.stereo and args.wandb and total_iters % 300 == 0:
                 wandb.log({'LR': scheduler.get_last_lr()[0], 'Train/total_loss': loss.item()}, step=total_iters)
@@ -559,10 +634,9 @@ def train(epoch_total, load_state):
                 ocams = getattr(data, 'ocams', None)
                 with torch.no_grad():
                     if args.stereo:
-                        dav2_rgb = (prepare_dav2_rgb(raw_imgs[0][None], args.dav2_model_repo, args.dav2_input_size).cuda()
-                                    if args.use_dav2_geometry else None)
-                        invdepth_idx = net_eval(imgs, grids, test_mode=True, iters=opts.train_iters,
-                                               valid_mask=candidate_mask, left_valid_mask=left_mask, dav2_rgb=dav2_rgb)
+                        invdepth_idx = stereo_forward(imgs, raw_imgs[0][None], False)
+                        if args.use_yinyang:
+                            valid = valid.astype(bool) & toNumpy(net_eval.output_valid[0, 0])
                     elif args.cnn_only:
                         invdepth_idx = net_eval(imgs, grids, test_mode=True, iters=opts.train_iters)
                     else:
@@ -645,6 +719,15 @@ def train(epoch_total, load_state):
                             usable_batches=usable_batches,
                             validation_errors=mean_errors.tolist() if mean_errors is not None else None)
         torch.save(snapshot, savefilename)
+        if args.stereo:
+            summary = dict(epoch=epoch + 1, train_loss=float(epoch_loss), optimizer_updates=optimizer_updates,
+                           validation_errors=mean_errors.tolist() if mean_errors is not None else None,
+                           epoch_seconds=time.time()-epoch_start, batches=usable_batches,
+                           peak_allocated_mib=torch.cuda.max_memory_allocated()/2**20,
+                           peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20, checkpoint=savefilename)
+            with open(osp.join(opts.model_dir, 'epochs.jsonl'), 'a') as handle:
+                handle.write(json.dumps(summary) + '\n')
+            LOG_INFO('Epoch %d complete: %.1f s, checkpoint %s' % (epoch + 1, summary['epoch_seconds'], savefilename))
         if stop_training:
             break
 

@@ -446,6 +446,7 @@ class UpdateBlock(nn.Module):
         super().__init__()
         self.num_downsample = num_downsample
         self.similarity_context = similarity_context  # For lookup
+        self.use_checkpoint = False
 
         # Motion encoder with separate sim, dino, gev inputs
         self.encoder = MotionEncoder(sim_context_dims, dino_dims, gev_dims,
@@ -479,6 +480,16 @@ class UpdateBlock(nn.Module):
         """
         # Lookup similarity context at current depth (corr branch)
         sim_context = self.similarity_context.lookup_context(similarity_profile, inv_depth)
+
+        # 只重计算无状态的卷积/GRU，不重做Lookup，也不读取另一分支的体缓存。
+        if self.use_checkpoint and self.training:
+            from torch.utils.checkpoint import checkpoint
+            return checkpoint(self._update, net, sim_context, dino_feat, gev_feat, inv_depth,
+                              no_upsample, use_reentrant=False)
+        return self._update(net, sim_context, dino_feat, gev_feat, inv_depth, no_upsample)
+
+    def _update(self, net, sim_context, dino_feat, gev_feat, inv_depth, no_upsample):
+        """原MotionEncoder→ConvGRU→DepthHead/凸上采样权重；无BN及体缓存副作用。"""
 
         # Encode motion with all three signals
         motion_feat = self.encoder(sim_context, dino_feat, gev_feat, inv_depth)
@@ -537,6 +548,8 @@ class OmniDS(nn.Module):
         opts.num_cams = 2
         opts.use_yinyang = False  # 在DA-V2/原GRU主干前增加双网格匹配前端。
         opts.gru_iters = 12
+        opts.yinyang_output = 'native'
+        opts.gradient_checkpointing = False
         opts.use_dav2_geometry = False
         self.opts = argparse(opts, varargin)
         if self.opts.num_cams != 2:
@@ -605,6 +618,7 @@ class OmniDS(nn.Module):
             num_downsample=self.opts.num_downsample,
             similarity_context=self.similarity_context,
         )
+        self.update_block.use_checkpoint = self.opts.gradient_checkpointing
 
         # Student encoder for DINO distillation. Built only when requested:
         # registering it unconditionally would add feature_student.* to
@@ -647,6 +661,10 @@ class OmniDS(nn.Module):
         self.enhancer = GeometryAwareFeatureEnhancer(self.opts.base_channel, depth_chunk=self.depth_chunk)
         self.warp = BidirectionalCrossGridWarp(grid_package, self.depth_chunk)
         self.fusion = GeometryAwareFeatureFusion(self.gev_module.num_groups)
+        if self.opts.get('training_geometry', False):
+            from module_cnn_only.yinyang_training import YinYangTrainingGeometry
+            self.training_geometry = YinYangTrainingGeometry(grid_package, 2**self.opts.num_downsample)
+        self.enhancer.local_refiner.use_checkpoint = self.opts.gradient_checkpointing
 
     def load_baseline_weights(self, state_dict):  # 显式继承DA-V2主干权重，新增双网格模块保留自身初始化。
         state = {key.removeprefix('module.'): value for key, value in state_dict.items()}
@@ -685,7 +703,7 @@ class OmniDS(nn.Module):
 
         branches, costs, masks = {}, {}, {}
         for name in ('yin', 'yang'):
-            patch = getattr(self.grid_package, name)
+            patch = self.training_geometry.patch(name) if hasattr(self, 'training_geometry') else getattr(self.grid_package, name)
             left, right, mask = sweep_patch(features, patch, self.depth_chunk)
             left, right = self.enhancer(left, right, patch.rays_ref, mask, patch.padding_valid)
             # 原Similarity接口使用[B,C,H,W,D]；代价融合接口使用[B,G,D,H,W]。
@@ -700,6 +718,10 @@ class OmniDS(nn.Module):
             branches[name] = dict(profile=profile, profile_valid=mask, context=context, left_valid=left_valid,
                                   left_grid=lg, guide=left.mean(dim=2))
 
+        if yang_to_yin_quality is None:
+            batch = features[0].shape[0]
+            yang_to_yin_quality = self.training_geometry.cross_quality('yin', batch, self.opts.num_invdepth)
+            yin_to_yang_quality = self.training_geometry.cross_quality('yang', batch, self.opts.num_invdepth)
         warped = self.warp(costs['yin'], costs['yang'], masks['yin'], masks['yang'])
         fused = self.fusion.forward_bidirectional(costs['yin'], costs['yang'], masks['yin'], masks['yang'],
                                                  warped, yang_to_yin_quality, yin_to_yang_quality)
@@ -841,6 +863,9 @@ class OmniDS(nn.Module):
 
         self.gev_module.clear_cache()
         self.similarity_context._candidate_valid = None
+        if self.opts.use_yinyang and self.opts.yinyang_output == 'left_fisheye':
+            predictions, self.output_valid = self.training_geometry.project(result)
+            return predictions[-1] if test_mode else predictions
         if self.opts.use_yinyang:
             return {name: row['final_depth_idx'] for name, row in result.items()} if test_mode else result
         return result['left']['final_depth_idx'] if test_mode else result['left']['predictions']

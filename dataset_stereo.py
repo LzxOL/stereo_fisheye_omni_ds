@@ -324,6 +324,11 @@ class StereoDataset(Dataset):
         floor = np.floor(index).astype(int).clip(0, self.num_invdepth - 1)
         ceil = np.ceil(index).astype(int).clip(0, self.num_invdepth - 1)
         y, x = np.indices(self.output_size)
+        if hasattr(self, 'output_candidate_valid'):
+            # Yin/Yang输出已投回同一左鱼眼像素；直接用该射线上的真实双目候选有效性。
+            work = self.output_candidate_valid
+            valid &= work[floor,y,x] & work[ceil,y,x]
+            return np.where(valid,index,-1).astype(np.float32)
         work = self.candidate_valid[0]
         # Match the network's output support mask and continuous D interpolation.
         valid &= work.any(0)[y // 2, x // 2]

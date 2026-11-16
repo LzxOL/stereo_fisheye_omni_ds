@@ -51,11 +51,21 @@ class LocalFeatureRefiner(nn.Module):
     def __init__(self, channels=32, geometry_channels=16, depth_chunk=8):
         super().__init__()
         self.depth_chunk = depth_chunk
+        self.use_checkpoint = False
         self.fusion = nn.Conv2d(channels + geometry_channels + 1, channels, 1)
         self.relu = nn.ReLU()
         self.local = nn.Conv2d(channels, channels, 3, padding=1)
         nn.init.zeros_(self.local.weight)
         nn.init.zeros_(self.local.bias)
+
+    def _refine_slice(self, feature, geo, mask):
+        base = feature.masked_fill(~mask, 0.0)
+        fused = torch.cat([base, geo.masked_fill(~mask, 0.0), mask.to(base.dtype)], dim=1)
+        hidden = self.relu(self.fusion(fused))
+        # 不让无效位置的1x1偏置经3x3传播到有效邻居；不做补洞或权重重归一化。
+        hidden = hidden.masked_fill(~mask, 0.0)
+        enhanced = (base + self.local(hidden)).masked_fill(~mask, 0.0)
+        return enhanced
 
     def forward(self, volume, geometry, stereo_valid, padding_valid):
         batch, channels, depth, height, width = volume.shape
@@ -72,14 +82,13 @@ class LocalFeatureRefiner(nn.Module):
             feature = feature.reshape(batch * count, channels, height, width)
             mask = valid[:, :, start:stop].permute(0, 2, 1, 3, 4)
             mask = mask.reshape(batch * count, 1, height, width)
-            base = feature.masked_fill(~mask, 0.0)
             geo = geometry[:, None].expand(-1, count, -1, -1, -1)
             geo = geo.reshape(batch * count, geometry.shape[1], height, width)
-            fused = torch.cat([base, geo.masked_fill(~mask, 0.0), mask.to(base.dtype)], dim=1)
-            hidden = self.relu(self.fusion(fused))
-            # 不让无效位置的1x1偏置经3x3传播到有效邻居；不做补洞或权重重归一化。
-            hidden = hidden.masked_fill(~mask, 0.0)
-            enhanced = (base + self.local(hidden)).masked_fill(~mask, 0.0)
+            if self.use_checkpoint and self.training:
+                from torch.utils.checkpoint import checkpoint
+                enhanced = checkpoint(self._refine_slice, feature, geo, mask, use_reentrant=False)
+            else:
+                enhanced = self._refine_slice(feature, geo, mask)
             enhanced = enhanced.reshape(batch, count, channels, height, width)
             outputs.append(enhanced.permute(0, 2, 1, 3, 4))
         # 分块限制单次Conv2d工作量；训练时autograd仍保留反向所需的中间量。
