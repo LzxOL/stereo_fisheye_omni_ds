@@ -43,7 +43,7 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cuda.benchmark = True
 
 parser = ArgumentParser(description='Training for OmniDS')
-parser.add_argument('--cnn_only', action='store_true', help='use CNN-only dynamic context, without DINO')
+parser.add_argument('--cnn_only', action='store_true', help='use stereo CNN-only static context, without DINO')
 parser.add_argument('--stereo', action='store_true', help='train the two-camera CNN-only baseline')
 parser.add_argument('--ref_cam', choices=['cam1', 'cam2', 'cam3', 'cam4'])
 parser.add_argument('--target_cam', choices=['cam1', 'cam2', 'cam3', 'cam4'])
@@ -55,7 +55,6 @@ parser.add_argument('--sweep_azimuth_span_deg', type=float, default=130.)
 parser.add_argument('--sweep_elevation_min_deg', type=float, default=-45.)
 parser.add_argument('--sweep_elevation_max_deg', type=float, default=45.)
 parser.add_argument('--use_group_variance', action='store_true', help='stereo ablation: restore GWC + variance')
-parser.add_argument('--use_dynamic_context', action='store_true', help='stereo ablation: restore dynamic context')
 parser.add_argument('--val_count', type=int, default=512, help='stereo held-out official-training frames')
 parser.add_argument('--seed', type=int, default=0, help='stereo split and training seed')
 parser.add_argument('--gt_width', type=int, help='select complete raw GT TIFF width when multiple versions exist')
@@ -179,6 +178,9 @@ elif (args.ref_cam or args.target_cam or args.max_train_steps is not None or arg
       or args.reference_grid != 'local_erp'):
     parser.error('Camera-pair and bounded-smoke options require --stereo')
 
+if args.cnn_only and not args.stereo:
+    parser.error('--cnn_only uses stereo static context; add --stereo and camera pair, or use original four-camera OmniDS without --cnn_only')
+
 if args.cnn_only:
     if args.distilled or args.use_dino_sim:
         parser.error('--cnn_only cannot be combined with --distilled or --use_dino_sim')
@@ -221,7 +223,6 @@ opts.net_opts.fix_bn = args.fix_bn
 if args.stereo:
     opts.net_opts.num_cams = 2
     opts.net_opts.use_group_variance = args.use_group_variance
-    opts.net_opts.use_dynamic_context = args.use_dynamic_context
 # ERP / cross-attention
 opts.net_opts.equi_h = args.equirect_size[0]
 opts.net_opts.equi_w = args.equirect_size[1]
@@ -303,9 +304,9 @@ def train(epoch_total, load_state):
                                            num_workers=0, drop_last=True)
     total_num_steps = len(data)*opts.total_epochs//opts.batch_size
 
-    LOG_INFO("Using stereo CNN baseline: group_variance=%s, dynamic_context=%s" %
-             (args.use_group_variance, args.use_dynamic_context) if args.stereo else
-             "Using module_cnn_only.network.OmniDS (dynamic CNN context + GEV)" if args.cnn_only
+    LOG_INFO("Using stereo CNN baseline: static context, group_variance=%s" %
+             args.use_group_variance if args.stereo else
+             "Using module_cnn_only.network.OmniDS (static CNN context + GEV)" if args.cnn_only
              else "Using OmniDS (DINO context + separate GEV)")
     if not args.cnn_only:
         LOG_INFO(f"  DINO model: {opts.net_opts.dino_model}, freeze: {opts.net_opts.freeze_dino}")
@@ -338,7 +339,7 @@ def train(epoch_total, load_state):
             if args.stereo and snapshot.get('stereo_geometry') != data.metadata:
                 raise ValueError('Restore checkpoint stereo geometry differs; do not mix camera pairs/candidate axes')
             if args.stereo:
-                for key in ('use_group_variance', 'use_dynamic_context'):
+                for key in ('use_group_variance',):
                     if snapshot['net_opts'].get(key) != opts.net_opts[key]:
                         raise ValueError(f'Restore checkpoint {key} differs; pass the matching ablation switch')
             if 'net_state_dict' in snapshot.keys():

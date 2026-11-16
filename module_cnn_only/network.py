@@ -214,8 +214,8 @@ class DINOERPExtractor(nn.Module):
     def _sample_dino_grid(self, dino_feats_stacked, grids_tensor, inv_depth_idx):
         """Fixed grid sampling fallback for DINO→ERP projection (ablation baseline).
 
-        Uses the same LUT-based approach as ``_sample_cnn_erp`` but with a simple
-        average over cameras (no learned view weights) for a clean ablation.
+        Uses depth-index interpolation of the per-camera LUT and averages the
+        sampled features. This legacy DINO helper is not used by CNN-only.
 
         Args:
             dino_feats_stacked: [B, num_cams, C, H_dino, W_dino]
@@ -500,22 +500,11 @@ class UpdateBlock(nn.Module):
 
 
 class OmniDS(nn.Module):
-    """
-    use_yinyang=True：在本类执行双网格扫描、融合和共享GRU优化，
-    几何包由构造参数grid_package提供，连续采样质量由forward关键字参数提供。
-    默认False：保持下述原双目/四目单网格流程与checkpoint键。
+    """双目CNN入口：左参考Context仅初始化一次，所有GRU迭代共用。
 
-    CNN-ONLY: CNN features for both matching and dynamic context, and a
-    separate Geometry Encoding Volume (GEV) for regularized geometry.
-
-    Pipeline:
-    1. Shared CNN over 2 or 4 fisheye images -> spherical sweep -> CNN volumes
-    2. SimilarityContext builds a depth-wise matching profile from those volumes
-    3. GEVModule builds a 3D-UNet-regularized geometry volume from the same
-       ref/tgt volumes and exposes a depth-axis pyramid for lookup
-    4. CNN features are sampled to ERP at the current depth to form dynamic context
-    5. Iteratively: look up similarity + GEV at the current depth, update through
-       the ConvGRU, and predict a depth residual
+    use_yinyang=True时执行双网格扫描、增强、融合和共享深度优化；
+    否则使用单网格Similarity/GEV路径。两条路径都不按当前深度刷新Context。
+    原始四目OmniDS使用module/network.py，不在此类中执行。
     """
 
     def __init__(self, varargin=None, grid_package=None):  # 构造网络：创建共享CNN，再按use_yinyang选择双网格或原单网格模块。
@@ -524,9 +513,9 @@ class OmniDS(nn.Module):
         opts.use_rgb = False
         opts.base_channel = 32
         opts.num_downsample = 1
-        opts.equi_h = 160
-        opts.equi_w = 640
-        opts.num_invdepth = 192
+        opts.equi_h = 320
+        opts.equi_w = 480
+        opts.num_invdepth = 96
         opts.phi_deg = 45.0
         opts.num_heads = 4
         opts.num_points = 4
@@ -544,18 +533,12 @@ class OmniDS(nn.Module):
         opts.similarity_type = 'correlation'
         # Distillation: build the lightweight student encoder (see --distilled)
         opts.use_student = False
-        opts.use_group_variance = True
-        opts.use_dynamic_context = True
-        opts.num_cams = 4
+        opts.use_group_variance = False
+        opts.num_cams = 2
         opts.use_yinyang = False  # True时走本类的双网格流程，旧模式保持默认。
-        if varargin is not None and varargin.get('num_cams', 4) == 2:
-            # Stereo defaults: volume [D,H,W]=[96,160,240], output H/W doubles.
-            opts.use_group_variance = False
-            opts.use_dynamic_context = False
-            opts.num_invdepth = opts.num_depth_samples = 96
-            opts.equi_h, opts.equi_w = 320, 480
-
         self.opts = argparse(opts, varargin)
+        if self.opts.num_cams != 2:
+            raise ValueError('CNN-only now uses stereo static context; use module.network.OmniDS for four cameras')
         if self.opts.num_cams == 2 and self.opts.num_invdepth != self.opts.num_depth_samples:
             raise ValueError('Stereo uses one complete candidate axis: num_invdepth == num_depth_samples')
         # CNN-ONLY: reject incompatible paths, including direct Python callers.
@@ -600,56 +583,6 @@ class OmniDS(nn.Module):
         )
         sim_context_dims = self.similarity_context.output_dim
         
-        # CNN-ONLY: retain original DINO/fusion initialization below without executing it.
-        # # DINO feature extractor (for context) - uses cross-attention with distortion embedding
-        # # Get fisheye image dimensions from encoder output (will be set dynamically)
-        # self.dino_extractor = DINOERPExtractor(
-        #     dino_model_name=self.opts.dino_model,
-        #     output_dim=dino_dims,
-        #     equi_h=self.erp_h,
-        #     equi_w=self.erp_w,
-        #     num_cams=4,
-        #     freeze_dino=self.opts.freeze_dino,
-        #     num_heads=self.opts.num_heads,
-        #     num_points=self.opts.num_points,
-        #     num_cross_attn_layers=self.opts.num_cross_attn_layers,
-        #     fish_h=384,  # Default fisheye height (will be updated from actual image)
-        #     fish_w=400,  # Default fisheye width (will be updated from actual image)
-        #     no_cross_attn=getattr(self.opts, 'no_dino_cross_attn', False),
-        # )
-        #
-        # # Select fusion type based on options (default: fast pointwise)
-        # fusion_type = getattr(self.opts, 'context_fusion_type', 'pointwise')
-        #
-        # self.cnn_erp_proj = Conv2D(cnn_dims, dino_dims, 1, pad=0, relu=False) if cnn_dims != dino_dims else None
-        #
-        # if fusion_type == 'pointwise':
-        #     self.context_fuser = ERPContextFusionPointwise(
-        #         embed_dims=dino_dims,
-        #         hidden_dims=dino_dims * 2,
-        #     )
-        # elif fusion_type == 'gated':
-        #     self.context_fuser = ERPContextFusionGated(
-        #         embed_dims=dino_dims,
-        #         hidden_dims=dino_dims,
-        #     )
-        # elif fusion_type == 'local':
-        #     self.context_fuser = ERPContextFusionLocalConv(
-        #         embed_dims=dino_dims,
-        #         hidden_dims=dino_dims * 2,
-        #     )
-        # elif fusion_type == 'attention':
-        #     self.context_fuser = ERPContextFusionAttention(
-        #         embed_dims=dino_dims,
-        #         num_heads=self.opts.num_heads,
-        #         ffn_dims=4 * dino_dims,
-        #         dropout=0.0,
-        #     )
-        # else:
-        #     raise ValueError(f"Unknown context_fusion_type: {fusion_type}")
-        #
-        self.cnn_erp_proj = Conv2D(cnn_dims, dino_dims, 1, pad=0, relu=False) if cnn_dims != dino_dims else None
-
         # CNN-ONLY: reuse original heads; context=32, initial hidden=64 (base_channel=32).
         self.context_proj = Conv2D(dino_dims, dino_dims, 1, pad=0, relu=False)
         self.state_proj = Conv2D(dino_dims, hidden_dim, 1, pad=0, relu=False)
@@ -676,13 +609,6 @@ class OmniDS(nn.Module):
             similarity_context=self.similarity_context,
         )
 
-        # Learned view weights: two aligned stereo views, or the original four views.
-        self.view_weight_head = nn.Sequential(
-            nn.Conv2d(cnn_dims * self.opts.num_cams, cnn_dims, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(cnn_dims, self.opts.num_cams, 1),
-        )
-
         # Student encoder for DINO distillation. Built only when requested:
         # registering it unconditionally would add feature_student.* to
         # state_dict and break strict loading of checkpoints trained without
@@ -705,7 +631,7 @@ class OmniDS(nn.Module):
         from module_cnn_only.geometry_aware_fusion import GeometryAwareFeatureFusion
         from module_cnn_only.depth_refinement import StereoDepthRefinement
 
-        if (self.opts.use_group_variance or self.opts.use_dynamic_context or
+        if (self.opts.use_group_variance or
                 self.opts.get('encoder_downsample_twice', False) or self.opts.get('use_dav2_geometry', False)):
             raise ValueError('Yin-Yang V1 uses the stride-2 CNN, static context and GWC only; no DA-V2')
         refinement_options = dict(self.opts.get('yinyang_refinement', {}))
@@ -808,124 +734,7 @@ class OmniDS(nn.Module):
         up_depth = up_depth.permute(0, 1, 4, 2, 5, 3)
         return up_depth.reshape(B, C, factor * H, factor * W)
     
-    def compute_reference_points_from_grids(self, grids, inv_depth_idx):  # 旧注意力接口：按连续深度索引插值Grid，生成各相机参考点；CNN-only主流程不调用。
-        """Compute reference points using pre-computed lookup tables."""
-        B = inv_depth_idx.shape[0]
-        device = inv_depth_idx.device
-        dtype = inv_depth_idx.dtype
 
-        reference_points = []
-
-        for cam_idx, grid in enumerate(grids):
-            grid = grid.to(device).to(dtype)
-            D = grid.shape[2]
-            
-            idx_flat = inv_depth_idx.view(B, -1)
-            
-            idx_floor = idx_flat.long().clamp(0, D - 1)
-            idx_ceil = (idx_floor + 1).clamp(0, D - 1)
-            weight = (idx_flat - idx_floor.float()).unsqueeze(-1)
-            
-            grid_flat = grid.view(-1, D, 2)
-            grid_flat = grid_flat.unsqueeze(0).expand(B, -1, -1, -1)
-            
-            idx_floor_exp = idx_floor.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2)
-            idx_ceil_exp = idx_ceil.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2)
-            
-            ref_floor = torch.gather(grid_flat, 2, idx_floor_exp).squeeze(2)
-            ref_ceil = torch.gather(grid_flat, 2, idx_ceil_exp).squeeze(2)
-            
-            ref_pts = ref_floor * (1 - weight) + ref_ceil * weight
-            ref_pts = (ref_pts + 1) / 2
-            
-            reference_points.append(ref_pts)
-        
-        reference_points = torch.stack(reference_points, dim=2)
-        return reference_points
-
-    def _sample_cnn_erp(self, cnn_feats_stacked, grids_tensor, inv_depth_idx, valid_mask=None):  # 原单网格动态Context：按当前索引采样各相机，再通过可见性和学习权重融合。
-        """
-        Sample CNN fisheye features to ERP with grid-validity masking and learned
-        view weighting.
-
-        Args:
-            cnn_feats_stacked: [B, N, C, Hf, Wf], N=2 or 4
-            grids_tensor: N tensors, each [H,W,D,2] in grid_sample coords
-            inv_depth_idx: [B, 1, H, W]
-            valid_mask: stereo joint visibility [B,1,D,H,W]; None for the original four views
-        Returns:
-            cnn_erp: [B, C, H, W]
-        """
-        B, num_cams, C, _, _ = cnn_feats_stacked.shape
-        H, W = inv_depth_idx.shape[2], inv_depth_idx.shape[3]
-        device = inv_depth_idx.device
-        dtype = cnn_feats_stacked.dtype
-
-        per_cam = []
-        validity = []
-        idx_flat = inv_depth_idx.view(B, -1)  # [B, H*W]
-
-        for cam_idx, grid_lut in enumerate(grids_tensor):
-            grid_lut = grid_lut.to(device=device, dtype=dtype)  # [H, W, D, 2]
-            D = grid_lut.shape[2]
-
-            idx_floor = idx_flat.long().clamp(0, D - 1)
-            idx_ceil = (idx_floor + 1).clamp(0, D - 1)
-            w = (idx_flat - idx_floor.float()).unsqueeze(-1)  # [B, H*W, 1]
-
-            # Stereo's left grid can be an expanded/non-contiguous view.
-            grid_flat = grid_lut.reshape(-1, D, 2).unsqueeze(0).expand(B, -1, -1, -1)
-            idx_floor_exp = idx_floor.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2)
-            idx_ceil_exp = idx_ceil.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2)
-
-            g0 = torch.gather(grid_flat, 2, idx_floor_exp).squeeze(2)
-            g1 = torch.gather(grid_flat, 2, idx_ceil_exp).squeeze(2)
-            grid = (1.0 - w) * g0 + w * g1  # [B, H*W, 2]
-            grid = grid.view(B, H, W, 2)
-
-            # Grid validity: coordinates inside [-1, 1] are within the camera FOV
-            valid = ((grid[..., 0].abs() <= 1) & (grid[..., 1].abs() <= 1)).float()
-            if valid_mask is not None:
-                if cam_idx == 0:
-                    # The left grid is depth-independent. Any stereo candidate at this
-                    # pixel establishes a usable left reference, even if current right is absent.
-                    support = valid_mask.any(dim=2)[:, 0]
-                else:
-                    candidates = valid_mask[:, 0].permute(0, 2, 3, 1).reshape(B, H * W, D)
-                    floor_valid = torch.gather(candidates, 2, idx_floor.unsqueeze(-1)).squeeze(-1)
-                    ceil_valid = torch.gather(candidates, 2, idx_ceil.unsqueeze(-1)).squeeze(-1)
-                    support = (floor_valid & ((w[..., 0] == 0) | ceil_valid)).view(B, H, W)
-                valid = valid * support
-            validity.append(valid)  # [B, H, W]
-
-            feat = F.grid_sample(
-                cnn_feats_stacked[:, cam_idx], grid,
-                mode='bilinear', padding_mode='zeros', align_corners=True,
-            )  # [B, C, H, W]
-            if valid_mask is not None:
-                feat = torch.where(valid[:, None].bool(), feat, 0.0)
-            per_cam.append(feat)
-
-        # [B, 4, C, H, W]  and  [B, 4, H, W]
-        per_cam = torch.stack(per_cam, dim=1)
-        validity_mask = torch.stack(validity, dim=1)
-
-        # Learned view weights conditioned on per-camera features
-        feat_concat = per_cam.view(B, num_cams * C, H, W)
-        learned_logits = self.view_weight_head(feat_concat)  # [B, 4, H, W]
-
-        # Mask out cameras outside FOV, then softmax
-        _mask_val = -1e4 if learned_logits.dtype == torch.float16 else -1e9
-        learned_logits = learned_logits.masked_fill(validity_mask == 0, _mask_val)
-        weights = F.softmax(learned_logits, dim=1)  # [B, 4, H, W]
-        if valid_mask is not None:
-            # No visible camera -> zero, rather than softmax's uniform all-masked result.
-            weights = weights * validity_mask
-            weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
-
-        # Weighted aggregation
-        cnn_erp = (per_cam * weights.unsqueeze(2)).sum(dim=1)  # [B, C, H, W]
-        return cnn_erp
 
     def forward(self, imgs, grids=None, iters=None, test_mode=False, ocams=None, distilled=False, valid_mask=None, left_valid_mask=None,
                 yang_to_yin_quality=None, yin_to_yang_quality=None):  # 网络总入口：双网格执行扫描、增强、融合和GRU优化；否则执行原Similarity/GEV流程。
@@ -960,39 +769,21 @@ class OmniDS(nn.Module):
             # CNN-ONLY: keep forward signature, but never execute DINO or its student.
             if distilled:
                 raise ValueError("CNN-only does not support distilled=True")
-            # # 1. Extract CNN features (for similarity/matching)
-            # # 2. Extract DINO features (for context only)
-            # dino_fish_h, dino_fish_w = imgs[0].shape[2], imgs[0].shape[3]
-            # self.dino_extractor.fish_h = dino_fish_h
-            # self.dino_extractor.fish_w = dino_fish_w
-            #
-            # if not distilled:
-            #     cnn_feats = self.encoder(imgs)  # list of 4 [B, C, H, W]
-            #     dino_feats_stacked = self.dino_extractor.extract_features(imgs)
-            # else:
-            #     if self.feature_student is None:
-            #         raise RuntimeError(
-            #             "distilled=True but the student encoder was not built. "
-            #             "Construct the network with use_student=True (pass --distilled)."
-            #         )
-            #     cnn_feats, dino_feats_stacked = self.feature_student(imgs)
-            #     dino_feats_resized = [F.interpolate(dino_feat, size=(cnn_feats[0].shape[2], cnn_feats[0].shape[3]), mode='bilinear', align_corners=False) for dino_feat in dino_feats_stacked]
-            #     dino_feats_stacked = torch.stack(dino_feats_resized, dim=0)
             cnn_feats = self.encoder(imgs)  # Original encoder, computed once for all iterations.
 
         if not self.opts.mixed_precision:
             cnn_feats = [feat.float() for feat in cnn_feats]
         B = cnn_feats[0].shape[0]
 
-        cnn_feats_stacked = torch.stack(cnn_feats, dim=1)
+        left_feature = cnn_feats[0]  # 静态Context只需要左参考CNN特征。
 
         grids_tensor = [g if torch.is_tensor(g) else torch.tensor(g, device=cnn_feats[0].device)
                         for g in grids]
         valid_pixels = None
         context_valid = None
         if self.opts.num_cams == 2:
-            grids_tensor = [g.to(device=cnn_feats_stacked.device, dtype=torch.float32) for g in grids_tensor]
-            valid_mask = valid_mask.to(cnn_feats_stacked.device)
+            grids_tensor = [g.to(device=left_feature.device, dtype=torch.float32) for g in grids_tensor]
+            valid_mask = valid_mask.to(left_feature.device)
             for g in grids_tensor:
                 visible = (torch.isfinite(g).all(-1) & (g.abs() <= 1).all(-1)).permute(2, 0, 1)
                 valid_mask = valid_mask & visible[None, None]
@@ -1008,8 +799,6 @@ class OmniDS(nn.Module):
                 # Left-invalid pixels cannot contribute matching evidence either.
                 valid_mask = valid_mask & left_valid_mask.unsqueeze(2)
                 valid_pixels = valid_mask.any(dim=2)
-            if self.opts.use_dynamic_context:
-                context_valid = valid_pixels
 
         # CNN-ONLY: no DINO dtype/device dependency.
 
@@ -1046,36 +835,18 @@ class OmniDS(nn.Module):
         # Initialize depth at D_grid / 2
         D_grid = grids_tensor[0].shape[2]
         inv_depth_idx = torch.zeros(B, 1, self.erp_h, self.erp_w,
-                                    device=cnn_feats_stacked.device,
-                                    dtype=cnn_feats_stacked.dtype)
+                                    device=left_feature.device,
+                                    dtype=left_feature.dtype)
         inv_depth_idx = inv_depth_idx + D_grid / 2
 
-        # CNN-ONLY: initialize context and hidden state from current-depth CNN ERP.
-        # CNN-ONLY: reference_points are only needed by the disabled DINO attention.
-        # reference_points = self.compute_reference_points_from_grids(grids_tensor, inv_depth_idx)
-
+        # 只在迭代前采样一次左参考Context，网格沿D不变，因此取第0层。
         with autocast(enabled=self.opts.mixed_precision):
-            # dino_erp = self.dino_extractor(
-            #     dino_feats_stacked, reference_points, inv_depth_idx,
-            #     grids_tensor=grids_tensor,
-            # )
-            # if not self.opts.mixed_precision:
-            #     dino_erp = dino_erp.float()
-
-            if self.opts.use_dynamic_context:
-                cnn_erp = self._sample_cnn_erp(
-                    cnn_feats_stacked, grids_tensor, inv_depth_idx, valid_mask
-                )
-            else:
-                # BASIC: one left-only sampling, independent of depth and right visibility.
-                grid = grids_tensor[0][:, :, 0].unsqueeze(0).expand(B, -1, -1, -1)
-                cnn_erp = F.grid_sample(cnn_feats_stacked[:, 0], grid.to(cnn_feats_stacked.dtype),
-                                        padding_mode='zeros', align_corners=True)
-                cnn_erp = torch.where(context_valid, cnn_erp, 0.0)
+            grid = grids_tensor[0][:, :, 0].unsqueeze(0).expand(B, -1, -1, -1)
+            cnn_erp = F.grid_sample(left_feature, grid.to(left_feature.dtype),
+                                    padding_mode='zeros', align_corners=True)
+            cnn_erp = torch.where(context_valid, cnn_erp, 0.0)
             if not self.opts.mixed_precision:
                 cnn_erp = cnn_erp.float()
-            if self.cnn_erp_proj is not None:
-                cnn_erp = self.cnn_erp_proj(cnn_erp)
 
             # CNN-ONLY: fused_erp = self.context_fuser(dino_erp, cnn_erp)
 
@@ -1091,32 +862,7 @@ class OmniDS(nn.Module):
         for itr in range(iters):
             inv_depth_idx = inv_depth_idx.detach()
 
-            # BASIC: original refresh code retained for use_dynamic_context=True.
-            if itr > 0 and self.opts.use_dynamic_context:
-                # CNN-ONLY: resample context at current depth; never reset recurrent net.
-                # reference_points = self.compute_reference_points_from_grids(grids_tensor, inv_depth_idx)
-
-                with autocast(enabled=self.opts.mixed_precision):
-                    # dino_erp = self.dino_extractor(
-                    #     dino_feats_stacked, reference_points, inv_depth_idx,
-                    #     grids_tensor=grids_tensor,
-                    # )
-                    # if not self.opts.mixed_precision:
-                    #     dino_erp = dino_erp.float()
-
-                    cnn_erp = self._sample_cnn_erp(
-                        cnn_feats_stacked, grids_tensor, inv_depth_idx, valid_mask
-                    )
-                    if not self.opts.mixed_precision:
-                        cnn_erp = cnn_erp.float()
-                    if self.cnn_erp_proj is not None:
-                        cnn_erp = self.cnn_erp_proj(cnn_erp)
-
-                    # CNN-ONLY: fused_erp = self.context_fuser(dino_erp, cnn_erp)
-                    context = torch.relu(self.context_proj(cnn_erp))
-                    if valid_pixels is not None:
-                        context = torch.where(valid_pixels, context, 0.0)
-
+            # Context保持固定；当前索引仍每轮用于匹配体Lookup，Hidden持续递归。
             # GEV lookup at current depth
             gev_feat = self.gev_module.lookup(inv_depth_idx, radius=self._gev_radius)
 

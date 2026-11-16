@@ -308,6 +308,47 @@ def check_disabled(device):
     return 'PASS'
 
 
+def check_static_single_grid(device):
+    # 单网格分支也只初始化一次Context，保留每轮Similarity/GEV Lookup和Hidden递归。
+    options = dict(num_cams=2, num_invdepth=16, num_depth_samples=16,
+                   equi_h=16, equi_w=32, sim_levels=2)
+    model = OmniDS(options).to(device).train()
+    assert not hasattr(model, '_sample_cnn_erp') and not hasattr(model, 'view_weight_head')
+    assert 'use_dynamic_context' not in model.opts
+    imgs = [torch.randn(1, 3, 24, 32, device=device, requires_grad=True) for _ in range(2)]
+    left_grid = torch.rand(8, 16, 1, 2, device=device) * 1.6 - .8
+    grids = [left_grid.expand(-1, -1, 16, -1), torch.rand(8, 16, 16, 2, device=device) * 1.6 - .8]
+    valid = torch.ones(1, 1, 16, 8, 16, device=device, dtype=torch.bool)
+    contexts, states, counts = [], [], dict(context=0, hidden=0, similarity_lookup=0, gev_lookup=0)
+    def count(name):
+        def hook(module, args, output):
+            counts[name] += 1
+        return hook
+    hooks = [layer.register_forward_hook(count(name)) for name, layer in (
+        ('context', model.context_proj), ('hidden', model.state_proj),
+        ('similarity_lookup', model.update_block.encoder.conv_sim1),
+        ('gev_lookup', model.update_block.encoder.conv_gev1))]
+    def record_inputs(module, args):
+        contexts.append(args[2].detach().clone())
+        states.append(args[0].detach().clone())
+    hooks.append(model.update_block.register_forward_pre_hook(record_inputs))
+    predictions = model(imgs, grids, iters=3, valid_mask=valid)
+    assert counts == dict(context=1, hidden=1, similarity_lookup=3, gev_lookup=3)
+    assert all(torch.equal(contexts[0], item) for item in contexts)
+    assert not torch.equal(states[0], states[-1])
+    sum(p.square().mean() for p in predictions).backward()
+    for image in imgs:
+        assert torch.isfinite(image.grad).all() and image.grad.abs().sum() > 0
+    for h in hooks:
+        h.remove()
+    # 复用原有Mask/Lookup/上采样测试，包括无匹配时左Context仍有效。
+    from tools.smoke_cnn_only import stereo_mask_checks
+    checks = stereo_mask_checks(model, imgs, grids, valid, 3)
+    restored = OmniDS(options).to(device).eval()
+    restored.load_state_dict(model.state_dict(), strict=True)
+    return dict(status='PASS', context_fixed=True, hidden_updated=True, calls=counts, mask_checks=checks)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', default='cpu')
@@ -318,6 +359,7 @@ def main():
     start = time.perf_counter()
     result = dict(torch=torch.__version__, device=str(device), lookup=check_lookup(device),
                   motion_and_gru=check_motion_and_gru(device), refinement_disabled=check_disabled(device))
+    result['static_single_grid'] = check_static_single_grid(device)
     result['pipeline_fp32'] = check_pipeline(device)
     result['pipeline_amp'] = check_pipeline(device, amp=True)
     result.update(status='PASS', elapsed_seconds=time.perf_counter() - start,

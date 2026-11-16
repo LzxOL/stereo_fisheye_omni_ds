@@ -1,7 +1,7 @@
 """CNN-only bounded smoke test using the original Dataset's calibrated LUT builder.
 
 Small test: python tools/smoke_cnn_only.py --db_root /data
-Four-camera real batch: add --real_sample --device cuda --mixed_precision.
+Real stereo batch: add --real_sample --device cuda --mixed_precision.
 Stereo: add --num_cams 2; --full_size uses D/H/W=96/160/240 and 768x800 images.
 Stereo --real_sample reads real images only; its loss is synthetic, never Rig GT.
 """
@@ -93,12 +93,7 @@ def stereo_mask_checks(model, imgs, grids, candidate, iterations):
     # Keep some stereo candidates but remove the current right projection.
     partial = candidate.clone()
     partial[:, :, d // 2:] = False
-    sampled = model._sample_cnn_erp(features, grids, index, partial)
-    supported_left = partial.any(2) & (grids[0][:, :, 0].abs() <= 1).all(-1)[None, None]
-    assert supported_left.any()
-    torch.testing.assert_close(sampled[supported_left.expand_as(sampled)], torch.ones_like(sampled[supported_left.expand_as(sampled)]))
     empty = torch.zeros_like(candidate)
-    assert not model._sample_cnn_erp(features, grids, index, empty).any()
     constant = torch.full_like(index, 3.25)
     mask = torch.zeros(b, 36, h, w, device=index.device)
     torch.testing.assert_close(model.upsample_depth(constant, mask),
@@ -137,29 +132,28 @@ def stereo_mask_checks(model, imgs, grids, candidate, iterations):
     assert all(torch.isfinite(p).all() and not p[..., 2*y[0]:2*y[0]+2, 2*x[0]:2*x[0]+2].any() for p in bad_output)
     sum(p.mean() for p in bad_output).backward()
     assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
-    if not model.opts.use_dynamic_context:
-        # Static context has its own left visibility, even where no stereo match exists.
-        was_training = model.training
-        model.eval()
-        captured = []
-        hook = model.update_block.register_forward_pre_hook(lambda m, i: captured.append(i[2].detach().clone()))
-        with torch.no_grad():
-            left = model.encoder(imgs)[0]
-            grid = grids[0][:, :, 0][None].expand(b, -1, -1, -1)
-            visible = (torch.isfinite(grid).all(-1) & (grid.abs() <= 1).all(-1))[:, None]
-            sampled_left = F.grid_sample(left, grid, align_corners=True)
-            expected = torch.relu(model.context_proj(torch.where(visible, sampled_left, 0.)))
-            expected = torch.where(visible, expected, 0.)
-            model(imgs, grids, iters=2, valid_mask=empty)
-            torch.testing.assert_close(captured[0], expected)
-            assert expected.abs().sum() > 0
-            captured.clear()
-            model(imgs, grids, iters=2, valid_mask=candidate,
-                  left_valid_mask=torch.zeros_like(index, dtype=torch.bool))
-            assert all(not context.any() for context in captured)
-        hook.remove()
-        model.train(was_training)
-    return dict(left_fallback=True, zero_context=True, constant_index_upsampling=True,
+    # Static context has its own left visibility, even where no stereo match exists.
+    was_training = model.training
+    model.eval()
+    captured = []
+    hook = model.update_block.register_forward_pre_hook(lambda m, i: captured.append(i[2].detach().clone()))
+    with torch.no_grad():
+        left = model.encoder(imgs)[0]
+        grid = grids[0][:, :, 0][None].expand(b, -1, -1, -1)
+        visible = (torch.isfinite(grid).all(-1) & (grid.abs() <= 1).all(-1))[:, None]
+        sampled_left = F.grid_sample(left, grid, align_corners=True)
+        expected = torch.relu(model.context_proj(torch.where(visible, sampled_left, 0.)))
+        expected = torch.where(visible, expected, 0.)
+        model(imgs, grids, iters=2, valid_mask=empty)
+        torch.testing.assert_close(captured[0], expected)
+        assert expected.abs().sum() > 0
+        captured.clear()
+        model(imgs, grids, iters=2, valid_mask=candidate,
+              left_valid_mask=torch.zeros_like(index, dtype=torch.bool))
+        assert all(not context.any() for context in captured)
+    hook.remove()
+    model.train(was_training)
+    return dict(static_left_context=True, invalid_left_context_zero=True, constant_index_upsampling=True,
                 invalid_lookup=True, partial_forward_backward=True, all_invalid_forward_backward=True,
                 nonfinite_grid_forward_backward=True)
 
@@ -170,9 +164,8 @@ def main():
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--real_sample', action='store_true')
     parser.add_argument('--mixed_precision', action='store_true')
-    parser.add_argument('--num_cams', type=int, choices=[2, 4], default=4)
+    parser.add_argument('--num_cams', type=int, choices=[2], default=2)
     parser.add_argument('--use_group_variance', action='store_true')
-    parser.add_argument('--use_dynamic_context', action='store_true')
     parser.add_argument('--full_size', action='store_true', help='stereo D/H/W=96/160/240, images 768x800')
     parser.add_argument('--num_invdepth', type=int)
     parser.add_argument('--iters', type=int, default=3)
@@ -195,8 +188,7 @@ def main():
                    num_depth_samples=args.num_invdepth if stereo else args.num_invdepth // 2,
                    sim_levels=4, gev_num_pyramid_levels=2, gev_radius=4,
                    mixed_precision=args.mixed_precision, cnn_only=True,
-                   use_group_variance=(not stereo or args.use_group_variance),
-                   use_dynamic_context=(not stereo or args.use_dynamic_context))
+                   use_group_variance=args.use_group_variance)
     # No fabricated grids and no new LUT cache in the dataset: use the exact author geometry.
     data_options = Edict(options)
     if stereo:
@@ -271,8 +263,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-5, eps=1e-8)
     # Prove GWC-only does not execute Python's original Tensor.var branch.
     guard = patch.object(torch.Tensor, 'var', side_effect=AssertionError('Variance executed')) if not model.opts.use_group_variance else nullcontext()
-    context_guard = patch.object(model, '_sample_cnn_erp', side_effect=AssertionError('Dynamic context executed')) if not model.opts.use_dynamic_context else nullcontext()
-    with guard, context_guard:
+    with guard:
         predictions = model(imgs, grids, iters=args.iters, valid_mask=candidate)
     assert len(predictions) == args.iters
     assert all(list(p.shape) == [1, 1, *size] and torch.isfinite(p).all() for p in predictions)
@@ -282,21 +273,17 @@ def main():
     scaler.unscale_(optimizer)
     gradients = {}
     for name, layer in [('cnn', model.encoder), ('context', model.context_proj), ('state', model.state_proj),
-                        ('view_weights', model.view_weight_head), ('similarity', model.similarity_context),
+                        ('similarity', model.similarity_context),
                         ('gev', model.gev_module), ('gru', model.update_block.gru),
                         ('depth_head', model.update_block.depth_head), ('upsample_mask', model.update_block.mask)]:
         grads = [p.grad for p in layer.parameters() if p.grad is not None]
-        if name == 'view_weights' and not model.opts.use_dynamic_context:
-            assert not grads
-            continue
         assert grads and all(torch.isfinite(g).all() for g in grads), name
         gradients[name] = sum(float(g.abs().sum()) for g in grads)
         assert gradients[name] > 0, name
     assert counts['cnn'] == counts['hidden_init'] == counts['profile'] == counts['gev_before_spatial_upsample'] == 1
-    assert counts['context'] == (args.iters if model.opts.use_dynamic_context else 1)
+    assert counts['context'] == 1
     assert shapes['gev_input'][1] == (16 if model.opts.use_group_variance else 8)
-    if not model.opts.use_dynamic_context:
-        assert all(torch.equal(contexts[0], c) for c in contexts)
+    assert all(torch.equal(contexts[0], c) for c in contexts)
     assert not torch.equal(hidden_states[0], hidden_states[-1])
     assert index_ranges[0] != index_ranges[-1]
     image_gradients = [float(img.grad.abs().sum()) for img in imgs] if stereo else []
@@ -337,7 +324,6 @@ def main():
                   input_gradient_l1=image_gradients, mask_checks=mask_checks,
                   index_ranges=index_ranges,
                   use_group_variance=model.opts.use_group_variance,
-                  use_dynamic_context=model.opts.use_dynamic_context,
                   context_constant=all(torch.equal(contexts[0], c) for c in contexts),
                   hidden_updated=True, lookup_indices_updated=True,
                   training_seconds=training_seconds, peak_allocated_mib=peak_memory)

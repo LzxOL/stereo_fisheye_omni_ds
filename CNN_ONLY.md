@@ -1,3 +1,8 @@
+> 当前实现：`module_cnn_only.network.OmniDS` 只使用双目静态左 Context。
+> 已删除动态 Context、视图权重头及其训练开关。原始四目方法请使用 `module/`。
+> 下文早期四目和动态实验结果属于历史记录，不代表当前代码仍提供这些路径。
+> 旧单网格权重含有已删除的视图权重头，不能直接严格加载；不得静默跳过参数。Yin-Yang 权重结构保持不变。
+
 # OmniDS CNN-only Baseline
 
 当前双目默认已进一步简化为 **GWC-only + Static Left Context**，开关和最新验证见文末。四目路径保持原有行为；下文此前阶段的动态 Context/Variance 描述是可恢复的消融路径。
@@ -145,8 +150,8 @@ with torch.no_grad():
 - `sweep.py`：沿用原 5D `grid_sample`，接受两路或四路特征和对应 Grid。
 - `SimilarityProfileEncoder`：双目直接取左体为 Reference、右体为 Target，跳过前后/左右混合 MLP；使用完整 D 轴，保持原相关性公式和空间聚合。
 - `GEVModule`：GWC 与两相机方差各 8 通道，输入 3D U-Net 仍为 16 通道。保留默认 `torch.var(correction=1)`，双目逐通道方差为 `(left-right)^2/2`。
-- `_sample_cnn_erp`：当前索引采样左右特征，权重头从 `4C→C→4` 变为 `2C→C→2`。右候选不可见时用左参考；没有任何有效候选的像素输出零。整数索引不错误地要求下一层有效，分数索引则要求相邻两层均有效。
-- 第零轮初始化 Hidden 和 Context，其余每轮只刷新 Context。保留 MotionEncoder、ConvGRU、DepthHead、Hidden 的递归传递和索引 detach；每轮更新后限制索引到 `[0,D-1]`。
+- 静态 Context：左参考 CNN 特征通过深度不变的左 Grid 采样一次，之后所有 GRU 迭代复用。
+- 初始化 Hidden 和 Context 各一次；保留每轮匹配 Lookup、Hidden 递归和索引 detach，索引仍限制在 `[0,D-1]`。
 - 保留凸上采样头和结构，双目只做空间上采样。无效邻居/图像边界在 Softmax 前排除，防止无效零值把有效深度拉向第零层，也保证常数索引场在边界保持常数；四目仍按原方式计算。
 
 调用方的 `valid_mask` 应包含两相机 FOV、图像范围和相机 invalid_mask。网络额外检查坐标有限性和范围；无效相关性/方差/聚合值清零，Lookup 的支持 Mask 随深度金字塔同步池化。全无效像素的最终输出为零，不能将其当作有效的第零层深度。
@@ -197,11 +202,11 @@ CUDA_VISIBLE_DEVICES=1 python tools/smoke_cnn_only.py --num_cams 2 \
 
 机器可读结果见 `CNN_ONLY_STEREO_VALIDATION.json`。
 
-**上述结果属于独立网络验证，不是真实 GT 训练。** 当前 `train.py --stereo` 已按文末章节接入左光心 GT；`--cnn_only` 单独使用仍是四目，原 `test.py` 仍未适配双目数据，不能直接用它评估双目权重。
+**上述结果属于独立网络验证，不是真实 GT 训练。** 当前 `train.py --stereo` 已按文末章节接入左光心 GT；`--cnn_only` 现在必须与 `--stereo` 配合，原 `test.py` 仍未适配双目数据，不能直接用它评估双目权重。
 
 ## 基础双目 Baseline：GWC-only + Static Left Context
 
-双目默认 `use_group_variance=False`、`use_dynamic_context=False`。原方差和动态采样代码均保留在开关分支中；四目默认仍使用二者，不改变原四目权重结构与计算。
+双目默认 `use_group_variance=False`，仅保留静态左 Context。方差仍可单独通过开关启用，动态 Context 已删除。
 
 ```python
 model = OmniDS(Edict(num_cams=2, mixed_precision=True)).cuda()
@@ -217,13 +222,13 @@ predictions = model([left, right], [grid_left, grid_right],
 
 默认关键尺寸没有变化：Context `[B,32,160,240]`、Hidden `[B,64,160,240]`、Similarity/GEV Lookup 为 36/18 通道、GRU 输入 `[B,160,160,240]`、输出 `[B,1,320,480]` 且索引保持 `[0,95]`。U-Net 入口现在是 `[B,8,96,80,120]`（已执行原空间池化）。
 
-恢复原双目创新路径时明确设置：
+需要比较方差分支时设置：
 
 ```python
-model = OmniDS(Edict(num_cams=2, use_group_variance=True, use_dynamic_context=True))
+model = OmniDS(Edict(num_cams=2, use_group_variance=True))
 ```
 
-开关相互独立，支持 GWC-only/Variance 与 Static/Dynamic 的四种组合。旧 16 通道 GEV 权重不能严格加载到基础 8 通道结构，程序会正常报错；未实现 `strict=False` 或静默跳过。恢复两个开关后旧双目权重可严格加载。
+现在只保留 GWC-only/Variance 消融，Context 始终静态。8/16 通道结构和删除前的旧视图权重头均会影响严格权重兼容性，不提供静默部分加载。
 
 最新验证沿用同一个 Smoke Test：
 
@@ -231,8 +236,8 @@ model = OmniDS(Edict(num_cams=2, use_group_variance=True, use_dynamic_context=Tr
 # 基础双目，小尺寸前后向、Mask 和权重重载。
 python tools/smoke_cnn_only.py --num_cams 2 --db_root /data
 
-# 恢复两个创新模块，检查原双目路径。
-python tools/smoke_cnn_only.py --num_cams 2 --use_group_variance --use_dynamic_context --db_root /data
+# 仅恢复方差分支，Context仍为静态。
+python tools/smoke_cnn_only.py --num_cams 2 --use_group_variance --db_root /data
 
 # 正式尺寸、真实图像/标定、12轮 AMP；网络测试仍使用人工索引目标。
 CUDA_VISIBLE_DEVICES=1 python tools/smoke_cnn_only.py --num_cams 2 \
@@ -276,7 +281,7 @@ CUDA_VISIBLE_DEVICES=1 python train.py --stereo \
 
 `--db_root` 是 `omnithings/` 的父目录。默认工作体 96×160×240、输出 320×480。原训练默认 100 Epoch 不变，可自行传 `--total_epochs`；本次没有启动完整训练。相机对可配置，cam4→cam3 是这次验证用的实际标定相机对，不是硬编码模型假设或精度最优结论。默认角度是根据实际共同视场推导的中心、水平130°和垂直±45°，逐候选 Mask 仍决定有效性。
 
-恢复创新模块时增加 `--use_group_variance --use_dynamic_context`。恢复训练用 `--restore_ckpt`，只加载自己的兼容双目 Checkpoint；权重严格加载，恢复时校验相机标定、候选轴、角度、网格 metadata 和两个消融开关，禁止静默混用 Rig GT/旧192轴或不兼容16通道权重。动态 Context 开关即使不改变权重 Shape，也必须与恢复 Checkpoint 一致，否则明确报错。Checkpoint 额外保存 scheduler、GradScaler、global_step、optimizer_updates、真实几何和训练参数。双目 AMP 跳过 optimizer 更新时也跳过 scheduler；原四目更新顺序不改。
+方差消融增加 `--use_group_variance`。恢复训练仍须匹配真实几何、候选轴和网络结构，权重严格加载；旧视图权重头需显式迁移。Checkpoint 中的 optimizer、scheduler、GradScaler 和训练参数继续沿用现有流程。
 
 有限规模真实 GT 验证命令：
 

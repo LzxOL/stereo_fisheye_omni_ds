@@ -3,7 +3,7 @@
 实现位置是当前 `OmniDS` 项目的 `module_cnn_only/`，不是另建 PDF-Omni 四目分支。
 正式入口已移入 **`module_cnn_only/network.py::OmniDS`**，在原类基础上增量适配。
 该类直接组织双网格扫描、增强、GWC、Warping、Fusion、聚合与GRU调用，未反向调用独立网络。
-原 `module/`、扫描、几何、融合、Dataset 和训练入口未改动；旧单网格网络默认行为与权重键保留。
+原 `module/`、扫描、几何、融合和Dataset保持不变。CNN-only现只保留双目静态Context；训练入口已删除动态开关。
 
 ## 文件与数据流
 
@@ -75,7 +75,7 @@ outputs = net([left_img, right_img],
               yin_to_yang_quality=quality_yin_to_yang)
 ```
 
-`use_yinyang=False` 为默认值，原双目/四目模型的调用方式不变。
+`use_yinyang=False` 为默认值，执行双目静态单网格流程。四目使用原 `module.network.OmniDS`。
 双网格 `iters=None` 使用 `options['gru_iters']`，默认3；原模式未传 `iters` 仍使用12。
 `test_mode=True` 返回 `{'yin': final_idx, 'yang': final_idx}`；普通模式返回完整两chart结果。
 双网格不传旧 `grids/valid_mask/left_valid_mask`；直接使用几何包已有网格和Mask。
@@ -200,3 +200,7 @@ checkpoint 除 `net.state_dict()` 外应保存 options、optimizer/scheduler、�
 - 迁移前独立Yin-Yang入口的checkpoint严格加载到OmniDS；聚合体、初始概率、初始化索引、最终索引及米制结果逐项严格一致。
 - 原独立类兼容入口与OmniDS严格互载，输出一致。新双网格实例不会创建未使用的旧Similarity/GEV模块。
 - 仍未接入双网格GT训练或统一输出图，不将入口迁移表述为正式训练闭环完成。
+
+## 静态Context清理
+
+已删除CNN-only中的动态采样、视图权重头和动态训练开关。Yin-Yang原本就是静态Context，权重键不变；旧单网格checkpoint含视图权重头，严格加载需要显式迁移，不静默忽略。上面的四目兼容测试为入口移植时的历史记录，当前CNN-only入口只支持双目；原四目方法仍保留于`module/`。每轮匹配Lookup和Hidden递归仍保留。
