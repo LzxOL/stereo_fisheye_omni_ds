@@ -383,6 +383,10 @@ def train(epoch_total, load_state):
     start_epoch = 0
     optimizer_updates = 0
     resume_step = None
+    if args.stereo and not load_state:
+        LOG_INFO('FROM SCRATCH: no stereo pretrain/restore checkpoint; all trainable parameters use initialization. '
+                 'Frozen DA-V2 backbone retains official pretrained weights.' if args.use_dav2_geometry else
+                 'FROM SCRATCH: no stereo pretrain/restore checkpoint; all trainable parameters use initialization.')
     if args.wandb:
         wandb.init(
             entity="entity",   
