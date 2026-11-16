@@ -17,10 +17,21 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from module_cnn_only.depth_refinement import DepthPyramid, DepthWiseLookup, MotionEncoder, StereoDepthRefinement
 from module_cnn_only.update import ConvGRU
+from module_cnn_only.network import OmniDS
 from module_cnn_only.dual_grid_stereo import DualFisheyeStereoNetwork
 from module_cnn_only.loss_functions import sequence_loss
 from experiments.local_spherical_grid.adaptive_local_grid_v1 import AdaptiveLocalSphericalGrid
 from tools.smoke_cross_grid_warp import synthetic_patch
+
+
+def make_network(package):
+    depth = len(package.metadata['inverse_depth_candidates'])
+    return OmniDS(dict(num_cams=2, use_yinyang=True, num_invdepth=depth,
+                       num_depth_samples=depth), grid_package=package)
+
+
+def run_network(model, imgs, qualities, **kwargs):
+    return model(imgs, yang_to_yin_quality=qualities[0], yin_to_yang_quality=qualities[1], **kwargs)
 
 
 def assert_finite_gradients(module):
@@ -131,7 +142,7 @@ def make_package():
 
 def check_pipeline(device, amp=False):
     package = make_package()
-    model = DualFisheyeStereoNetwork(package).to(device).train()
+    model = make_network(package).to(device).train()
     imgs = [torch.randn(1, 3, 32, 40, device=device, requires_grad=True) for _ in range(2)]
     qualities = [torch.linspace(.15, .95, 16 * np.prod(p.shape), device=device).reshape(1, 1, 16, *p.shape)
                  for p in (package.yin, package.yang)]
@@ -183,7 +194,7 @@ def check_pipeline(device, amp=False):
     for step in range(2):
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp):
-            output = model(imgs, *qualities)
+            output = run_network(model, imgs, qualities)
             loss = 0.
             for name in ('yin', 'yang'):
                 row = output[name]
@@ -232,12 +243,29 @@ def check_pipeline(device, amp=False):
     buffer = io.BytesIO()
     torch.save(model.state_dict(), buffer)
     buffer.seek(0)
-    restored = DualFisheyeStereoNetwork(package).to(device).eval()
+    restored = make_network(package).to(device).eval()
     restored.load_state_dict(torch.load(buffer, map_location=device, weights_only=True), strict=True)
     with torch.no_grad():
-        a, b = model(imgs, *qualities), restored(imgs, *qualities)
+        a, b = run_network(model, imgs, qualities), run_network(restored, imgs, qualities)
     for name in ('yin', 'yang'):
         torch.testing.assert_close(a[name]['final_depth_idx'], b[name]['final_depth_idx'])
+
+    # 旧独立入口不再维护网络实现；它与正式入口可以严格互载，输出相同。
+    compatible = DualFisheyeStereoNetwork(package).to(device).eval()
+    compatible.load_state_dict(model.state_dict(), strict=True)
+    with torch.no_grad():
+        old_api = compatible(imgs, *qualities)
+        inference = run_network(model, imgs, qualities, test_mode=True, iters=3)
+        one_iteration = run_network(model, imgs, qualities, iters=1)
+        model.opts.mixed_precision = True
+        internal_amp = run_network(model, imgs, qualities, iters=1)
+        model.opts.mixed_precision = False
+    for name in ('yin', 'yang'):
+        torch.testing.assert_close(old_api[name]['final_depth_idx'], a[name]['final_depth_idx'])
+        torch.testing.assert_close(inference[name], a[name]['final_depth_idx'])
+        assert len(one_iteration[name]['predictions']) == 1
+        assert torch.isfinite(internal_amp[name]['final_depth_idx']).all()
+    assert not hasattr(model, 'gev_module') and not hasattr(model, 'similarity_context')
 
     # 候选轴端点和小数索引，米制转换不得乘2或误用192轴。
     index = torch.tensor([[[[0., 7.5, 15.]]]], device=device)
@@ -249,7 +277,7 @@ def check_pipeline(device, amp=False):
     for patch in (package.yin, package.yang):
         patch.stereo_valid[:] = False
     model.train().zero_grad(set_to_none=True)
-    empty = model(imgs, *qualities)
+    empty = run_network(model, imgs, qualities)
     sum(row['final_depth_idx'].sum() + row['init_depth_idx'].sum() for row in empty.values()).backward()
     for row in empty.values():
         assert not row['valid'].any() and not row['depth_prob'].any() and not row['radial_depth'].any()
@@ -261,7 +289,8 @@ def check_pipeline(device, amp=False):
                 recorded_shapes=shapes, scan_shapes=scan_shapes[:2], intermediate_dtypes=dtypes,
                 calls_per_forward={k: v // 2 for k, v in counts.items()},
                 cnn_both_inputs_and_all_branches_backward='PASS', hidden_recurrence_and_static_context='PASS',
-                strict_checkpoint_roundtrip='PASS', all_invalid='PASS',
+                strict_checkpoint_roundtrip='PASS', canonical_omnids_and_compatibility_api='PASS',
+                internal_amp_and_inference_api='PASS', all_invalid='PASS',
                 parameters=sum(p.numel() for p in model.parameters()))
 
 

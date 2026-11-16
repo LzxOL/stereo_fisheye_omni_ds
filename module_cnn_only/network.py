@@ -1,7 +1,6 @@
-# module/network.py
-# OmniDS: omnidirectional depth from 4 fisheye views.
-# CNN matching + DINO context + a 3D-UNet Geometry Encoding Volume,
-# aggregated to ERP by BEVFormer-style deformable cross-attention.
+# module_cnn_only/network.py
+# CNN-only网络入口：保留原单网格双目/四目路径，并增加Yin-Yang双网格路径。
+# 双网格：CNN → 扫描/增强 → GWC/Warp/Fusion → 多通道3D聚合 → Lookup/ConvGRU。
 # Author: Adapted from ROmniStereo and BEVFormer
 
 import torch
@@ -502,6 +501,10 @@ class UpdateBlock(nn.Module):
 
 class OmniDS(nn.Module):
     """
+    use_yinyang=True：在本类执行双网格扫描、融合和共享GRU优化，
+    几何包由构造参数grid_package提供，连续采样质量由forward关键字参数提供。
+    默认False：保持下述原双目/四目单网格流程与checkpoint键。
+
     CNN-ONLY: CNN features for both matching and dynamic context, and a
     separate Geometry Encoding Volume (GEV) for regularized geometry.
 
@@ -515,7 +518,7 @@ class OmniDS(nn.Module):
        the ConvGRU, and predict a depth residual
     """
 
-    def __init__(self, varargin=None):
+    def __init__(self, varargin=None, grid_package=None):
         super().__init__()
         opts = Edict()
         opts.use_rgb = False
@@ -544,6 +547,7 @@ class OmniDS(nn.Module):
         opts.use_group_variance = True
         opts.use_dynamic_context = True
         opts.num_cams = 4
+        opts.use_yinyang = False  # True时走本类的双网格流程，旧模式保持默认。
         if varargin is not None and varargin.get('num_cams', 4) == 2:
             # Stereo defaults: volume [D,H,W]=[96,160,240], output H/W doubles.
             opts.use_group_variance = False
@@ -572,6 +576,13 @@ class OmniDS(nn.Module):
             getattr(self.opts, 'encoder_downsample_twice', False)
         )
         
+        # 双网格使用各自原生H/W，不使用下方旧路径的单个ERP尺寸和单通道GEV。
+        if self.opts.use_yinyang:
+            self._init_yinyang(grid_package)
+            return
+        if grid_package is not None:
+            raise ValueError('grid_package requires use_yinyang=True')
+
         # Compute downsampled ERP size
         factor = 2 ** self.opts.num_downsample
         self.erp_h = self.opts.equi_h // factor
@@ -701,6 +712,100 @@ class OmniDS(nn.Module):
             self.feature_student = None
 
         self.debug_outputs = {}
+
+    def _init_yinyang(self, grid_package):
+        """在原OmniDS中注册双网格模块；不创建旧Similarity/独立GEV分支。
+
+        共享encoder已在原构造函数创建；其余模块各只有一套参数。
+        """
+        from module_cnn_only.geometry_refiner import GeometryAwareFeatureEnhancer
+        from module_cnn_only.cross_grid_warp import BidirectionalCrossGridWarp
+        from module_cnn_only.geometry_aware_fusion import GeometryAwareFeatureFusion
+        from module_cnn_only.depth_refinement import StereoDepthRefinement
+
+        if grid_package is None or self.opts.num_cams != 2:
+            raise ValueError('use_yinyang requires num_cams=2 and a calibrated grid_package')
+        if (self.opts.use_group_variance or self.opts.use_dynamic_context or
+                self.opts.get('encoder_downsample_twice', False) or self.opts.get('use_dav2_geometry', False)):
+            raise ValueError('Yin-Yang V1 uses the stride-2 CNN, static context and GWC only; no DA-V2')
+        refinement_options = dict(self.opts.get('yinyang_refinement', {}))
+        refinement_options.setdefault('context_channels', self.opts.base_channel)
+        if refinement_options['context_channels'] != self.opts.base_channel:
+            raise ValueError('Yin-Yang context_channels must match base_channel')
+        if refinement_options.get('num_depth', self.opts.num_invdepth) != self.opts.num_invdepth:
+            raise ValueError('Yin-Yang num_depth must match num_invdepth')
+        depth_chunk = self.opts.get('depth_chunk', 8)
+        self.grid_package = grid_package
+        axis = torch.tensor(grid_package.metadata['inverse_depth_candidates'], dtype=torch.float32)
+        if len(axis) < 2 or not torch.isfinite(axis).all() or not (axis > 0).all() or not (axis.diff() > 0).all():
+            raise ValueError('Use the actual positive increasing radial inverse-depth candidate axis')
+        # 不重建EPS→rho_max轴：原192[::2]的96候选以几何包实际数值为准。
+        self.register_buffer('inverse_depth_candidates', axis)
+        num_depth = refinement_options.pop('num_depth', self.opts.num_invdepth)
+        if num_depth != len(axis):
+            raise ValueError('Network and grid package must use exactly the same candidate axis')
+        self.groups = refinement_options.get('gwc_groups', 8)
+        self.channels = refinement_options.get('context_channels', 32)
+        self.depth_chunk = depth_chunk
+        self.enhancer = GeometryAwareFeatureEnhancer(self.channels, depth_chunk=depth_chunk)
+        self.warp = BidirectionalCrossGridWarp(grid_package, depth_chunk)
+        self.fusion = GeometryAwareFeatureFusion(self.groups)
+        self.refinement = StereoDepthRefinement(num_depth=num_depth, **refinement_options)
+
+        self.debug_outputs = {}
+
+    def index_to_depth(self, indices, valid):
+        """连续候选索引→(径向逆深度1/m,径向距离m)，无效像素均返回0。
+
+        直接在几何包候选轴上线性插值，兼容实际96层的终点而不误用原192轴。
+        第0层使用包中的有限EPS，对应远场近似，不能视作0米深度。
+        """
+        idx = indices.float().clamp(0, len(self.inverse_depth_candidates) - 1)
+        low = idx.floor().long()
+        high = (low + 1).clamp(max=len(self.inverse_depth_candidates) - 1)
+        axis = self.inverse_depth_candidates.float()
+        rho = axis[low] + (idx - low.float()) * (axis[high] - axis[low])
+        radial = rho.reciprocal()
+        return rho.masked_fill(~valid, 0.), radial.masked_fill(~valid, 0.)
+
+    def _forward_yinyang(self, imgs, yang_to_yin_quality, yin_to_yang_quality, iters):
+        """OmniDS双网格数据流，体统一[B,C,D,H,W]；保留各自原生H/W。
+
+        静态左Context单独采样；增强→GWC→双向Warp→Fusion→8通道聚合与GRU。
+        不调用独立网络入口；depth_refinement.py只负责复用的后半算法模块。
+        """
+        from experiments.local_spherical_grid.adaptive_local_grid_v1 import sweep_patch, sample_reference
+        from module_cnn_only.similarity_context import groupwise_correlation_volume
+
+        if len(imgs) != 2:
+            raise ValueError('imgs must be [left_fisheye, right_fisheye]')
+        features = self.encoder(imgs)  # 原共享CNN，每Forward一次。
+        costs, masks, contexts, context_valid = {}, {}, {}, {}
+        for name in ('yin', 'yang'):
+            patch = getattr(self.grid_package, name)
+            left, right, mask = sweep_patch(features, patch, self.depth_chunk)
+            left, right = self.enhancer(left, right, patch.rays_ref, mask, patch.padding_valid)
+            # 原GWC函数用[B,C,H,W,D]；仅在接口处明确转换，内部数学计算不变。
+            # 原GWC只拆分C为groups/channels_per_group，可直接读取permute视图，
+            # 无需为两个巨大的32通道扫描体各做一次contiguous复制。
+            cost = groupwise_correlation_volume(left.permute(0, 1, 3, 4, 2),
+                                                right.permute(0, 1, 3, 4, 2), self.groups)
+            costs[name] = cost.permute(0, 1, 4, 2, 3).contiguous().masked_fill(~mask, 0.)
+            masks[name] = mask
+            # 必须从未joint-mask的左CNN单独采样，不能取增强后左体的某个D切片。
+            contexts[name], context_valid[name] = sample_reference(features[0], patch)
+
+        warped = self.warp(costs['yin'], costs['yang'], masks['yin'], masks['yang'])
+        fused = self.fusion.forward_bidirectional(costs['yin'], costs['yang'], masks['yin'], masks['yang'],
+                                                 warped, yang_to_yin_quality, yin_to_yang_quality)
+        result = {}
+        for name in ('yin', 'yang'):
+            output = self.refinement(fused['fused_' + name], contexts[name], fused[name + '_valid'],
+                                     context_valid[name], iters=iters)
+            output['inverse_depth'], output['radial_depth'] = self.index_to_depth(output['final_depth_idx'], output['valid'])
+            output['fusion_weights'] = fused[name + '_weights']
+            result[name] = output
+        return result
 
     def freeze_bn(self):
         for m in self.modules():
@@ -850,9 +955,15 @@ class OmniDS(nn.Module):
         cnn_erp = (per_cam * weights.unsqueeze(2)).sum(dim=1)  # [B, C, H, W]
         return cnn_erp
 
-    def forward(self, imgs, grids, iters=12, test_mode=False, ocams=None, distilled=False, valid_mask=None, left_valid_mask=None):
+    def forward(self, imgs, grids=None, iters=None, test_mode=False, ocams=None, distilled=False, valid_mask=None, left_valid_mask=None,
+                yang_to_yin_quality=None, yin_to_yang_quality=None):
         """
-        Forward pass with separate GEV + Similarity Context.
+        use_yinyang=True时：使用构造函数中的grid_package，grids不传。
+        yang_to_yin_quality / yin_to_yang_quality位于各自目标网格[B,1,D,H,W]。
+        训练返回两chart的完整dict；test_mode=True返回{yin:final_idx, yang:final_idx}。
+        默认3轮，可用iters覆盖；不做跨网格Resize或索引乘2。
+
+        原模式：separate GEV + Similarity Context，未传iters时仍为12轮。
 
         Stereo: imgs=[left,right], grids=[left_grid,right_grid]; the left grid is
         repeated along D. valid_mask is required and includes both cameras' FOV
@@ -862,6 +973,26 @@ class OmniDS(nn.Module):
         Include the camera invalid_mask here unless invisible left pixels are
         already encoded as out-of-range coordinates in the left grid.
         """
+        # 旧模式未传iters时仍为12；双网格默认用refinement配置中的3轮。
+        if iters is None:
+            iters = self.refinement.gru_iters if self.opts.use_yinyang else 12
+        if self.opts.use_yinyang:
+            if len(imgs) != 2 or iters < 1:
+                raise ValueError('Yin-Yang requires two images and positive iters')
+            if distilled or grids is not None or valid_mask is not None or left_valid_mask is not None:
+                raise ValueError('Yin-Yang uses its geometry-package grids/masks, not legacy grid arguments')
+            if yang_to_yin_quality is None or yin_to_yang_quality is None:
+                raise ValueError('Yin-Yang requires explicit continuous sampling quality in both directions')
+            # 支持opts.mixed_precision及外层autocast；几何采样仍由原函数保持FP32。
+            device_type = imgs[0].device.type
+            enabled = self.opts.mixed_precision or torch.is_autocast_enabled(device_type)
+            with torch.autocast(device_type=device_type, enabled=enabled):
+                result = self._forward_yinyang(imgs, yang_to_yin_quality, yin_to_yang_quality, iters)
+            if test_mode:
+                return {name: row['final_depth_idx'] for name, row in result.items()}
+            return result
+        if grids is None:
+            raise ValueError('Legacy OmniDS requires grids')
         if len(imgs) != self.opts.num_cams or len(grids) != self.opts.num_cams or iters < 1:
             raise ValueError('Expected num_cams images/grids and at least one iteration')
         if self.opts.num_cams == 2:

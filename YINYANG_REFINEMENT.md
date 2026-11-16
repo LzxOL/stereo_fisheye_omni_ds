@@ -1,13 +1,15 @@
 # Yin–Yang 多通道代价聚合与 GRU V1
 
 实现位置是当前 `OmniDS` 项目的 `module_cnn_only/`，不是另建 PDF-Omni 四目分支。
-原 `module/`、`module_cnn_only/network.py`、扫描、几何、融合、Dataset 和训练入口均未改动。
-以前独立实现的前半部分在新入口中串联；旧网络继续使用原有接口与权重。
+正式入口已移入 **`module_cnn_only/network.py::OmniDS`**，在原类基础上增量适配。
+该类直接组织双网格扫描、增强、GWC、Warping、Fusion、聚合与GRU调用，未反向调用独立网络。
+原 `module/`、扫描、几何、融合、Dataset 和训练入口未改动；旧单网格网络默认行为与权重键保留。
 
 ## 文件与数据流
 
 - `module_cnn_only/depth_refinement.py`：多通道 3D 聚合、分类初始化、深度金字塔、Lookup、三路 Motion Encoder 和迭代器。
-- `module_cnn_only/dual_grid_stereo.py`：完整双网格双目入口 `DualFisheyeStereoNetwork`。
+- `module_cnn_only/network.py`：正式 `OmniDS` 入口，`_init_yinyang` 注册模块，`_forward_yinyang` 组织完整数据流，`forward` 根据开关调度。
+- `module_cnn_only/dual_grid_stereo.py`：旧独立类名的兼容接口，只转调正式入口，不再保留重复实现。原独立入口的checkpoint可严格加载到新入口。
 - `tools/smoke_dual_grid_refinement.py`：默认尺寸组件测试、小尺寸完整网络前后向及 AMP/权重重载验证。
 
 ```text
@@ -59,7 +61,26 @@ options = dict(
 `use_refinement=False` 只输出 Soft-argmax 初始化，用于消融。
 外部 `torch.autocast` 控制 AMP，使用 AMP 时不要对整个模型调用 `.half()`：几何缓存保留 FP32。
 
-`forward(imgs, yang_to_yin_quality, yin_to_yang_quality, iters=None)`：
+正式调用方式（`package` 使用现有真实标定几何缓存）：
+
+```python
+from module_cnn_only.network import OmniDS
+
+net_options = dict(num_cams=2, use_yinyang=True, num_invdepth=96,
+                   num_depth_samples=96, base_channel=32,
+                   yinyang_refinement=options)
+net = OmniDS(net_options, grid_package=package).to(device)
+outputs = net([left_img, right_img],
+              yang_to_yin_quality=quality_yang_to_yin,
+              yin_to_yang_quality=quality_yin_to_yang)
+```
+
+`use_yinyang=False` 为默认值，原双目/四目模型的调用方式不变。
+双网格 `iters=None` 使用 `options['gru_iters']`，默认3；原模式未传 `iters` 仍使用12。
+`test_mode=True` 返回 `{'yin': final_idx, 'yang': final_idx}`；普通模式返回完整两chart结果。
+双网格不传旧 `grids/valid_mask/left_valid_mask`；直接使用几何包已有网格和Mask。
+
+`forward(imgs, grids=None, iters=None, ..., yang_to_yin_quality=None, yin_to_yang_quality=None)`：
 
 - `imgs=[left,right]`；原共享 CNN 默认灰度模式，行为与 `FeatureLayers` 一致；RGB 模式通过 `use_rgb=True` 配置。
 - 两个 Quality 分别在 Yin/Yang 目标网格上，浮点 `[B,1,D,H,W]`，Q∈[0,1]。
@@ -121,12 +142,16 @@ Lookup 用连续索引选取多尺度局部候选，将匹配证据从 `C×D` �
 在训练循环中，模型调用与现有优化器、AMP、Sequence Loss 可按以下方式连接；前提是调用方已经正确准备各网格 GT：
 
 ```python
-from module_cnn_only.dual_grid_stereo import DualFisheyeStereoNetwork
+import torch
+from module_cnn_only.network import OmniDS
 from module_cnn_only.loss_functions import sequence_loss
 
-net = DualFisheyeStereoNetwork(package, **options).to(device)
+net_options = dict(num_cams=2, use_yinyang=True, num_invdepth=96,
+                   num_depth_samples=96, yinyang_refinement=options)
+net = OmniDS(net_options, grid_package=package).to(device)
 # optimizer/scheduler/GradScaler 沿用现有训练配置；不覆盖原 checkpoint。
-outputs = net([left_img, right_img], quality_yang_to_yin, quality_yin_to_yang)
+outputs = net([left_img, right_img], yang_to_yin_quality=quality_yang_to_yin,
+              yin_to_yang_quality=quality_yin_to_yang)
 losses = []
 for name in ('yin', 'yang'):
     row = outputs[name]
@@ -141,7 +166,7 @@ if losses:
     optimizer.step()
 ```
 
-上述示例需 `import torch` 并创建现有 optimizer；不是可直接执行的数据训练脚本。
+上述示例需创建现有 optimizer；不是可直接执行的数据训练脚本。
 GT 索引也必须对应包中同一 96 候选轴，所有预测与 Mask 在对应 chart 上监督。
 checkpoint 除 `net.state_dict()` 外应保存 options、optimizer/scheduler、几何包配置/哈希和候选轴；严格重载时重新提供同一几何包。
 原 CNN-only/PDF-Omni 权重不是新结构的严格兼容权重，不能使用 `strict=False` 隐藏结构差异。
@@ -167,3 +192,11 @@ checkpoint 除 `net.state_dict()` 外应保存 options、optimizer/scheduler、�
 
 没有运行 CUDA FP16、真实原生大网格前后向或 OmniThings 真 GT 训练；不能将 CPU BF16 结果当作 GPU 显存验证或精度提升证据。合成质量及合成监督只用于验证实现。
 没有启动正式训练、下载数据或改写已有权重。
+
+## network.py 移植回归
+
+- Smoke Test直接实例化 `module_cnn_only.network.OmniDS`，完整网络FP32/CPU BF16前后向、内部AMP开关、推理返回值及迭代次数覆盖均通过。
+- 迁移前保存了旧双目/四目确定性随机初始化权重、键列表与前向结果；迁移后逐项检查，权重和结果均严格一致（atol=rtol=0），旧checkpoint严格加载通过。
+- 迁移前独立Yin-Yang入口的checkpoint严格加载到OmniDS；聚合体、初始概率、初始化索引、最终索引及米制结果逐项严格一致。
+- 原独立类兼容入口与OmniDS严格互载，输出一致。新双网格实例不会创建未使用的旧Similarity/GEV模块。
+- 仍未接入双网格GT训练或统一输出图，不将入口迁移表述为正式训练闭环完成。
