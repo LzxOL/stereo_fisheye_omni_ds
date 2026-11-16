@@ -1,0 +1,44 @@
+# V1 schema changes require a new version; selected_grid.json is historical.
+version: adaptive-local-yinyang-v1.0
+profile: yin50
+selection_file: selected_grid_yin50.json
+conventions:
+  camera_model: original_ocam
+  reference_origin: left_camera_optical_center
+  rays: unit_vector_in_reference_ocam
+  depth: radial_inverse_depth
+  angles: degrees
+  basis: columns_are_local_axes_in_visual_frame
+  align_corners: true
+dataset:
+  name: omnithings
+  reference_camera: 4
+  target_camera: 3
+  input_size: [768, 800]
+  num_depth: 96
+  full_num_depth: 192
+generation:
+  yin_lat_limit: 50.0
+  yang_max_lat: 45.0
+  seam_deg: 5.0
+  padding_deg: 2.0
+  boundary_step_deg: 0.5
+  native_angular_step_deg: 0.75
+  max_yang_lon_span: 355.0
+  tilt_min: 45.0
+  tilt_max: 135.0
+  coarse_step_deg: 15.0
+  refine_step_deg: 2.0
+  refine_top: 6
+  final_top: 48
+  search_size: [90, 180]
+  # Match the 720x1440 boundary refit used by the validated Yin50 comparison.
+  analysis_size: [720, 1440]
+network:
+  # GEV spatial pool 2, then two stride-2 UNet stages; D has no initial pool.
+  spatial_multiple: 8
+  depth_multiple: 4
+  cnn_stride: 2
+  sweep_size: [160, 240]
+  output_size: [320, 480]
+  feature_channels: 32

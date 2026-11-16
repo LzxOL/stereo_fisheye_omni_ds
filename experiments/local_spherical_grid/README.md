@@ -2,7 +2,9 @@
 
 这是独立的 **OCam 几何 + RGB 可视化实验**。只新增本目录，没有改动 Stereo 网络、数据集或训练入口；不运行模型、不读取 GT、不评估深度精度。
 
-Git 中保存实验源码和 `selected_grid.json`（当前 cam4/cam3 搜索结果的原样冻结副本）。下述 `outputs*` 中的数据快照、NPZ、HTML、图片和验证报告为本地生成物，不随代码提交。新克隆仓库需要将 `--data-root` 指向实际 OmniThings 目录，再按下文命令生成；`selected_grid.json` 可作为验证脚本的 `--selection` / `--selected-json` 输入，但不能代替相机 Mask、RGB 或 GT 数据。后续 GT 诊断脚本只离线读取 GT，不参与网格搜索。
+当前V1默认Profile已切换为 **yin50**，配置在`grid_v1_config.yaml`、新选择结果在`selected_grid_yin50.json`，完整验收在本地`outputs_v1_yin50/REPORT_YIN50.md`。`grid_v1_yin60_legacy.yaml`、`selected_grid.json`及`outputs_v1/`保留历史±60°实验。下文前半部分保留原实验含义，当前API与运行命令见末尾V1章节。
+
+Git 中保存实验源码和冻结选择文件。下述 `outputs*` 中的数据快照、NPZ、HTML、图片和验证报告为本地生成物，不随代码提交。新克隆仓库需要将 `--data-root` 指向实际 OmniThings 目录，再按下文命令生成；选择JSON可作为验证脚本的 `--selection` / `--selected-json` 输入，但不能代替相机 Mask、RGB 或 GT 数据。后续 GT 诊断脚本只离线读取 GT，不参与网格搜索。
 
 ## 直接查看本次实际结果
 
@@ -226,4 +228,112 @@ python experiments/local_spherical_grid/compare_high_latitude_anisotropy.py \
 
 需要 NumPy、Matplotlib、Plotly 和可用中文字体。首先运行 `validate_parameterization.py` 生成 `reference_quality_maps.npz`、`yang_native_quality.npz`。输出 PNG/PDF/SVG、离线 HTML、CSV/JSON、NPZ 和 `REPORT_ANISOTROPY.md`；`--stats-only` 可仅计算统计。
 
-当前 cam4/cam3 的主 ERP `|纬度|>60°` 几何共视区域，按球面面积乘有效候选数量加权：理论 κ 均值从 4.55413647 降到 1.03063577，P99 从 25.47133706 降到 1.13749755。该子区域均由 Yang 覆盖。此处只反映参数化质量，不代表深度误差改善；原生共同支持缺失仍按验证结论保留。
+上述历史±60°布局在主 ERP `|纬度|>60°` 几何共视区域，按球面面积乘有效候选数量加权：理论 κ 均值从 4.55413647 降到 1.03063577，P99 从 25.47133706 降到 1.13749755。该子区域均由 Yang 覆盖。此处只反映参数化质量，不代表深度误差改善；原生共同支持缺失仍按验证结论保留。
+
+## Adaptive Local Yin–Yang Grid V1
+
+V1仅提供几何包和可微特征采样，不集成新的GEV/GRU或训练流程。默认`yin50`优先采样质量；历史`yin60_legacy`通过显式配置使用。两者同一schema，profile/config_hash区别几何缓存。新报告为`outputs_v1_yin50/REPORT_YIN50.md`，历史报告`outputs_v1/REPORT_GRID_V1.md`保持原样。
+
+- `adaptive_local_grid_v1.py`：确定性构建、校准哈希、NPZ/JSON保存加载、独立Padding、跨网格/最终输出域映射、分块Sweeping和严格支持查询。
+- `grid_v1_config.yaml`：默认Yin±50°；720×1440边界重拟合与此前50对照一致，原其余几何约束保持不变。`grid_v1_yin60_legacy.yaml`保留60及其原360×720拟合来源。固定数学约定、数据集约定、工程约束、网络尺寸分别分组；自动得到的边界/旋转保存在metadata，不能从标定唯一闭式推导。
+- `compare_grid_configs.py`：±45/50/60重新搜索和相近预算单旋转ERP对照；无可行结果明确记录。
+- `test_grid_v1.py`：独立坐标、候选轴、缓存、Padding、Batch Bucket、多帧及受控合成外参测试。
+- `test_grid_torch.py`：真实原图→共享原CNN→双图特征体，独立验证梯度/Mask/AMP，不训练Stereo。
+- `build_grid_v1_report.py`：汇总实际数据，生成V1报告、PNG及离线3D。
+
+最小API（相机必须已经加载真实`invalid_mask`）：
+
+```python
+from experiments.local_spherical_grid.adaptive_local_grid_v1 import (
+    AdaptiveLocalSphericalGrid, load_config, sweep_patch, sample_reference,
+    sample_patch, shape_bucket,
+)
+
+config = load_config()
+# axis由原工程192[::2]得到，保持同一96层，不在V1中重定义端点。
+package = AdaptiveLocalSphericalGrid.build(cam4, cam3, axis, config)
+package.save('/cache/grid_v1_geometry')
+restored = AdaptiveLocalSphericalGrid.load(
+    '/cache/grid_v1_geometry',
+    expected_calibration_hash=package.metadata['calibration_hash'],
+    expected_config=config,
+)
+
+# 每路cnn_feature=[B,32,384,400]；Yin/Yang分别采样，不resize到相同H/W。
+left, right, valid = sweep_patch([left_feature, right_feature], package.yin, depth_chunk=8)
+# 当前yin50的Yin：[B,32,96,136,216]、[B,32,96,136,216]、[B,1,96,136,216]
+# 对package.yang调用相同接口，体为[B,32,96,128,328]，不需要固定相同H/W。
+context, left_valid = sample_reference(left_feature, package.yin)
+# context仅使用左自身有效性，不被双目共同Mask裁掉。
+```
+
+默认重新搜索当前标定；可向`build(..., selection=...)`显式提供当前相机对应的已验证JSON字典。缓存选择须与实际内外参、候选轴一致，构建时仍逐候选重新计算Mask并检查窗口/接缝覆盖。不同标定不应强套当前窗口；没有共同FOV或没有可行Yang时会返回明确错误。
+
+`load_config()`默认50；`load_config('.../grid_v1_yin60_legacy.yaml')`显式60。`expected_config`会拒绝同一标定下错误的Profile缓存。旧的无config_hash缓存仍可按原接口加载；若显式要求新Profile，则需要使用对应配置重新构建，不能用文件名代替配置校验。
+
+单位/形状合同：
+
+- `rays_ref=[Hpad,Wpad,3]`：实际左OCam单位射线，Padding是NaN且必须由Mask屏蔽。
+- `left_uv=[Hpad,Wpad,2]`、`right_uv=[D,Hpad,Wpad,2]`：原鱼眼像素，顺序`(u列,v行)`。
+- `left_grid=[Hpad,Wpad,2]`、`right_grid=[D,Hpad,Wpad,2]`：stride=2 CNN的`align_corners=True`归一化坐标，不能与uv混用。
+- `stereo_valid=[D,Hpad,Wpad]`：同一三维候选在左右原图及CNN采样范围都有效；不是遮挡可见性。
+- `basis`列为visual系下局部坐标轴，`r_ref=A@basis@r_local`；`A=diag(-1,-1,1)`是正交旋转。角度均为度，径向距离为米。
+- `reference`保留320×480完整左鱼眼输出射线/像素/left_valid、逐候选stereo_valid、left_only；两图工作域不能替代完整输出域。
+- `reference['to_yin/to_yang']`及`yin/yang_to_output`、`yin_to_yang/yang_to_yin`是射线对应的归一化查询图，附独立window Mask。它们**不是**保证所有插值角点有效的Mask。
+- 对匹配特征查询使用`sample_patch(values, patch, query_rays, support)`：`values=[N,C,Hpad,Wpad]`，`support=[N,1,Hpad,Wpad]`；可把D并到N逐深度查询。所有非零权重角点均有效才返回True，否则值为0。不做无效角点重新归一化或补洞。
+- `shape_bucket`按Batch内每张图的最大H/W补零并返回left/feature/stereo/padding Mask；不改变角度和射线。不同候选轴不能混批。对Bucket输出进行单Rig查询前，先按`padded_shapes`裁回该Rig保存的Padding尺寸，再调用`sample_patch`；查询坐标按该尺寸定义。
+
+Padding依据真实结构：GEV空间2×池化→两次3D stride2，因此H/W倍数8；深度不做初始池化，两次下采样要求D倍数4。当前D96同时兼容深度金字塔。右/下补齐，原生采样不动，`patch.unpad(tensor)`裁回原始H/W。
+
+可执行验收（以下目录为服务器本次真实运行位置，均可替换）：
+
+```bash
+PY=/opt/pdf-omni-venv/bin/python
+DATA=/root/lzx_ws/datasets/Omnidirectional_Stereo_Dataset/omnithings
+OUT=/cache/adaptive_grid_v1_yin50_20261116
+
+$PY experiments/local_spherical_grid/compare_grid_configs.py \
+  --data-root "$DATA" --cases 50 --output-dir "$OUT/comparison"
+$PY experiments/local_spherical_grid/test_grid_v1.py \
+  --data-root "$DATA" --frames 4887 4888 4889 --synthetic \
+  --output "$OUT/grid_v1_tests.json"
+# 生成缓存完成后再读，不并发重写DataLoader正在使用的同名缓存。
+$PY experiments/local_spherical_grid/test_grid_torch.py \
+  --data-root "$DATA" --geometry "$OUT/grid_v1_geometry" --device cuda:1 \
+  --output "$OUT/grid_v1_smoke.json"
+# 同环境重跑历史60，原selected_grid.json不会覆盖。
+$PY experiments/local_spherical_grid/test_grid_v1.py \
+  --config experiments/local_spherical_grid/grid_v1_yin60_legacy.yaml \
+  --data-root "$DATA" --output "$OUT/legacy_yin60/grid_v1_tests.json"
+$PY experiments/local_spherical_grid/test_grid_torch.py \
+  --data-root "$DATA" --geometry "$OUT/legacy_yin60/grid_v1_geometry" --device cuda:1 \
+  --output "$OUT/legacy_yin60/grid_v1_smoke.json"
+# 报告另外读取coverage/quality/legacy_coordinates_rgb子目录的实际验收输出。
+$PY experiments/local_spherical_grid/build_grid_v1_report.py \
+  --output-dir "$OUT"
+```
+
+构建/保存是CPU NumPy几何；Torch采样保持坐标FP32，允许CNN AMP。原始`module/`、双目网络、GT转换、Legacy训练入口均不在本次修改范围。V1 PASS只指几何与采样接口验收，不表示已经实现双图深度融合或验证深度精度提升。
+
+新冻结窗口：Yin经度[-34.125°,123.875°]、纬度[-50°,50°]，原生135×212→Padding136×216；Yang经度[-121°,121°]、纬度[-45°,44.5°]，原生121×324→Padding128×328。Yang为重新搜索结果，不能沿用旧60的旋转矩阵。
+
+全部几何/质量重新验证命令（先生成相同配置的完整搜索导出）：
+
+```bash
+$PY experiments/local_spherical_grid/search_yang_grid.py \
+  --data-root "$DATA" --ref-cam 4 --target-cam 3 --frame-id 4887 \
+  --yin-lat-limit 50 --sphere-height 720 --sphere-width 1440 \
+  --output-dir "$OUT/search"
+$PY experiments/local_spherical_grid/validate_grid_coverage.py \
+  --selection "$OUT/search/search_result.json" --native-dir "$OUT/search" \
+  --data-root "$DATA" --resolutions 360 720 720 1440 --output-dir "$OUT/coverage"
+$PY experiments/local_spherical_grid/validate_parameterization.py \
+  --selected-dir "$OUT/search" --output-dir "$OUT/quality"
+$PY experiments/local_spherical_grid/validate_coordinates_rgb.py \
+  --data-root "$DATA" --selected-json "$OUT/search/search_result.json" \
+  --frames 4887 4888 4889 --output-dir "$OUT/legacy_coordinates_rgb"
+```
+
+新布局在720×1440的实际像素κ均值1.05543298、P99 1.29068323；几何覆盖仍为100%。严格支持不足为0.99939278%，不能再沿用旧60的0.88398%。两者反映不同问题，均需报告并用Mask隔离无效证据。
+
+适用范围：yin50在真实cam4/cam3及90°受控合成布局通过；平行光轴和15°合成布局在当前固定约束的有限搜索中未找到可行Yang，返回`NO_FEASIBLE_YANG`，没有自动放宽条件。这不是连续不可行证明，也不能据此保证任意Rig都适用同一默认约束；新Rig需要独立搜索/验收或显式选择其他Profile。
