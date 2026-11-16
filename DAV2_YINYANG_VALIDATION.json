@@ -1,0 +1,508 @@
+{
+  "date": "2026-11-16",
+  "purpose": "Incremental Yin-Yang front-end on the trained DA-V2 Context baseline",
+  "cpu": {
+    "status": "PASS",
+    "scope": "synthetic frozen ViT; real Adapter/Fusion/GEV/UpdateBlock code",
+    "torch": "2.11.0",
+    "runs": [
+      {
+        "status": "PASS",
+        "use_dav2": false,
+        "amp": false,
+        "device": "cpu",
+        "depth": 16,
+        "elapsed_seconds": 0.2681185839464888,
+        "synthetic_losses": [
+          11.536765098571777,
+          10.666450500488281
+        ],
+        "output_shapes": {
+          "yin": [
+            1,
+            1,
+            16,
+            32
+          ],
+          "yang": [
+            1,
+            1,
+            32,
+            32
+          ]
+        },
+        "shapes": {
+          "gev": [
+            1,
+            1,
+            16,
+            8,
+            8
+          ],
+          "context": [
+            1,
+            32,
+            16,
+            16
+          ],
+          "hidden": [
+            1,
+            64,
+            16,
+            16
+          ],
+          "motion": [
+            1,
+            128,
+            16,
+            16
+          ],
+          "gru": [
+            1,
+            64,
+            16,
+            16
+          ]
+        },
+        "original_motion_input_channels": [
+          36,
+          32,
+          18,
+          1
+        ],
+        "shared_baseline_keys": 281,
+        "transfer": {
+          "inherited_keys": 281,
+          "initialized_keys": [
+            "enhancer.geometry_encoder.B",
+            "enhancer.geometry_encoder.mlp.0.bias",
+            "enhancer.geometry_encoder.mlp.0.weight",
+            "enhancer.geometry_encoder.mlp.2.bias",
+            "enhancer.geometry_encoder.mlp.2.weight",
+            "enhancer.local_refiner.fusion.bias",
+            "enhancer.local_refiner.fusion.weight",
+            "enhancer.local_refiner.local.bias",
+            "enhancer.local_refiner.local.weight",
+            "fusion.network.0.bias",
+            "fusion.network.0.weight",
+            "fusion.network.2.bias",
+            "fusion.network.2.weight",
+            "inverse_depth_candidates",
+            "warp.yang_in_yin",
+            "warp.yang_padding",
+            "warp.yang_to_yin",
+            "warp.yin_in_yang",
+            "warp.yin_padding",
+            "warp.yin_to_yang"
+          ],
+          "removed_unused_keys": []
+        },
+        "checkpoint_transfer": null,
+        "backbone_frozen": null,
+        "rgb_changes_context_without_changing_gev": null,
+        "peak_allocated_mib": null,
+        "supervision": "synthetic candidate-index targets; no accuracy claim"
+      },
+      {
+        "status": "PASS",
+        "use_dav2": true,
+        "amp": false,
+        "device": "cpu",
+        "depth": 16,
+        "elapsed_seconds": 0.23135224997531623,
+        "synthetic_losses": [
+          11.536759376525879,
+          10.666336059570312
+        ],
+        "output_shapes": {
+          "yin": [
+            1,
+            1,
+            16,
+            32
+          ],
+          "yang": [
+            1,
+            1,
+            32,
+            32
+          ]
+        },
+        "shapes": {
+          "gev": [
+            1,
+            1,
+            16,
+            8,
+            8
+          ],
+          "adapter": [
+            1,
+            32,
+            2,
+            3
+          ],
+          "geometry": [
+            1,
+            32,
+            16,
+            16
+          ],
+          "fusion": [
+            1,
+            32,
+            16,
+            16
+          ],
+          "context": [
+            1,
+            32,
+            16,
+            16
+          ],
+          "hidden": [
+            1,
+            64,
+            16,
+            16
+          ],
+          "motion": [
+            1,
+            128,
+            16,
+            16
+          ],
+          "gru": [
+            1,
+            64,
+            16,
+            16
+          ]
+        },
+        "original_motion_input_channels": [
+          36,
+          32,
+          18,
+          1
+        ],
+        "shared_baseline_keys": 307,
+        "transfer": {
+          "inherited_keys": 307,
+          "initialized_keys": [
+            "enhancer.geometry_encoder.B",
+            "enhancer.geometry_encoder.mlp.0.bias",
+            "enhancer.geometry_encoder.mlp.0.weight",
+            "enhancer.geometry_encoder.mlp.2.bias",
+            "enhancer.geometry_encoder.mlp.2.weight",
+            "enhancer.local_refiner.fusion.bias",
+            "enhancer.local_refiner.fusion.weight",
+            "enhancer.local_refiner.local.bias",
+            "enhancer.local_refiner.local.weight",
+            "fusion.network.0.bias",
+            "fusion.network.0.weight",
+            "fusion.network.2.bias",
+            "fusion.network.2.weight",
+            "inverse_depth_candidates",
+            "warp.yang_in_yin",
+            "warp.yang_padding",
+            "warp.yang_to_yin",
+            "warp.yin_in_yang",
+            "warp.yin_padding",
+            "warp.yin_to_yang"
+          ],
+          "removed_unused_keys": []
+        },
+        "checkpoint_transfer": null,
+        "backbone_frozen": true,
+        "rgb_changes_context_without_changing_gev": true,
+        "peak_allocated_mib": null,
+        "supervision": "synthetic candidate-index targets; no accuracy claim"
+      },
+      {
+        "status": "PASS",
+        "use_dav2": true,
+        "amp": true,
+        "device": "cpu",
+        "depth": 16,
+        "elapsed_seconds": 2.8106777080101892,
+        "synthetic_losses": [
+          11.5,
+          10.625
+        ],
+        "output_shapes": {
+          "yin": [
+            1,
+            1,
+            16,
+            32
+          ],
+          "yang": [
+            1,
+            1,
+            32,
+            32
+          ]
+        },
+        "shapes": {
+          "gev": [
+            1,
+            1,
+            16,
+            8,
+            8
+          ],
+          "adapter": [
+            1,
+            32,
+            2,
+            3
+          ],
+          "geometry": [
+            1,
+            32,
+            16,
+            16
+          ],
+          "fusion": [
+            1,
+            32,
+            16,
+            16
+          ],
+          "context": [
+            1,
+            32,
+            16,
+            16
+          ],
+          "hidden": [
+            1,
+            64,
+            16,
+            16
+          ],
+          "motion": [
+            1,
+            128,
+            16,
+            16
+          ],
+          "gru": [
+            1,
+            64,
+            16,
+            16
+          ]
+        },
+        "original_motion_input_channels": [
+          36,
+          32,
+          18,
+          1
+        ],
+        "shared_baseline_keys": 307,
+        "transfer": {
+          "inherited_keys": 307,
+          "initialized_keys": [
+            "enhancer.geometry_encoder.B",
+            "enhancer.geometry_encoder.mlp.0.bias",
+            "enhancer.geometry_encoder.mlp.0.weight",
+            "enhancer.geometry_encoder.mlp.2.bias",
+            "enhancer.geometry_encoder.mlp.2.weight",
+            "enhancer.local_refiner.fusion.bias",
+            "enhancer.local_refiner.fusion.weight",
+            "enhancer.local_refiner.local.bias",
+            "enhancer.local_refiner.local.weight",
+            "fusion.network.0.bias",
+            "fusion.network.0.weight",
+            "fusion.network.2.bias",
+            "fusion.network.2.weight",
+            "inverse_depth_candidates",
+            "warp.yang_in_yin",
+            "warp.yang_padding",
+            "warp.yang_to_yin",
+            "warp.yin_in_yang",
+            "warp.yin_padding",
+            "warp.yin_to_yang"
+          ],
+          "removed_unused_keys": []
+        },
+        "checkpoint_transfer": null,
+        "backbone_frozen": true,
+        "rgb_changes_context_without_changing_gev": true,
+        "peak_allocated_mib": null,
+        "supervision": "synthetic candidate-index targets; no accuracy claim"
+      }
+    ]
+  },
+  "official_e27": {
+    "status": "PASS",
+    "scope": "official DA-V2 ViT-B; real calibrated RGB",
+    "torch": "2.8.0+cu128",
+    "runs": [
+      {
+        "status": "PASS",
+        "use_dav2": true,
+        "amp": true,
+        "device": "cuda:2",
+        "depth": 96,
+        "elapsed_seconds": 4.146914144977927,
+        "synthetic_losses": [
+          40.22380065917969,
+          27.759498596191406
+        ],
+        "output_shapes": {
+          "yin": [
+            1,
+            1,
+            16,
+            32
+          ],
+          "yang": [
+            1,
+            1,
+            16,
+            48
+          ]
+        },
+        "shapes": {
+          "gev": [
+            1,
+            1,
+            96,
+            4,
+            12
+          ],
+          "adapter": [
+            1,
+            32,
+            37,
+            39
+          ],
+          "geometry": [
+            1,
+            32,
+            8,
+            24
+          ],
+          "fusion": [
+            1,
+            32,
+            8,
+            24
+          ],
+          "context": [
+            1,
+            32,
+            8,
+            24
+          ],
+          "hidden": [
+            1,
+            64,
+            8,
+            24
+          ],
+          "motion": [
+            1,
+            128,
+            8,
+            24
+          ],
+          "gru": [
+            1,
+            64,
+            8,
+            24
+          ]
+        },
+        "original_motion_input_channels": [
+          36,
+          32,
+          18,
+          1
+        ],
+        "shared_baseline_keys": 481,
+        "transfer": {
+          "inherited_keys": 481,
+          "initialized_keys": [
+            "enhancer.geometry_encoder.B",
+            "enhancer.geometry_encoder.mlp.0.bias",
+            "enhancer.geometry_encoder.mlp.0.weight",
+            "enhancer.geometry_encoder.mlp.2.bias",
+            "enhancer.geometry_encoder.mlp.2.weight",
+            "enhancer.local_refiner.fusion.bias",
+            "enhancer.local_refiner.fusion.weight",
+            "enhancer.local_refiner.local.bias",
+            "enhancer.local_refiner.local.weight",
+            "fusion.network.0.bias",
+            "fusion.network.0.weight",
+            "fusion.network.2.bias",
+            "fusion.network.2.weight",
+            "inverse_depth_candidates",
+            "warp.yang_in_yin",
+            "warp.yang_padding",
+            "warp.yang_to_yin",
+            "warp.yin_in_yang",
+            "warp.yin_padding",
+            "warp.yin_to_yang"
+          ],
+          "removed_unused_keys": []
+        },
+        "checkpoint_transfer": {
+          "inherited_keys": 481,
+          "initialized_keys": [],
+          "removed_unused_keys": [
+            "view_weight_head.0.bias",
+            "view_weight_head.0.weight",
+            "view_weight_head.2.bias",
+            "view_weight_head.2.weight"
+          ]
+        },
+        "backbone_frozen": true,
+        "rgb_changes_context_without_changing_gev": true,
+        "peak_allocated_mib": 1834.83544921875,
+        "supervision": "synthetic candidate-index targets; no accuracy claim"
+      }
+    ]
+  },
+  "baseline_checkpoint": "/workspace/stereo_fisheye_omni_ds/checkpoints/omnids_dav2_context_resume30_20261113/omnids_dav2_context_resume30_20261113_e27.pth",
+  "real_frame": 4887,
+  "reference_camera": "cam4",
+  "target_camera": "cam3",
+  "real_input_size": [
+    768,
+    800
+  ],
+  "official_preprocessed_rgb_size": [
+    518,
+    546
+  ],
+  "validation_native_shapes": {
+    "yin": [
+      8,
+      16
+    ],
+    "yang": [
+      8,
+      24
+    ]
+  },
+  "angular_step_deg_for_smoke": 15.0,
+  "production_geometry_cache_modified": false,
+  "single_grid_regression": "FP32 forward and all parameter gradients exactly match pre-change source",
+  "matching_precision": "96 unchanged depth candidates; original 36/18-channel lookup",
+  "limits": [
+    "Synthetic index targets, not real-GT accuracy evaluation",
+    "Q is synthetic constant 0.8",
+    "Reduced angular sampling for smoke; not native-grid memory profiling",
+    "No long training",
+    "Unified left-view output/GT for dual charts not implemented in this task"
+  ],
+  "server_tested_sources_sha256": {
+    "module_cnn_only/network.py": "1f472b1dd48cc1625cef531ac6e09a02d7a8ee0e602b8801e66cf4b28d9513a6",
+    "module_cnn_only/dav2_geometry.py": "e54a0e30b5999be58948d252a5bda55672b855b98e0b348e82983cc9155f9b49",
+    "module_cnn_only/similarity_context.py": "7a9bab14b30a237fef76b81e0f2327125af98c203cc59a52aa2daf2ab02bba14",
+    "tools/smoke_dav2_yinyang.py": "9cbad5882ecc4a94579c7d1abcdcd8bdbcb3025d68a149b24cb64b468259d8a1"
+  }
+}

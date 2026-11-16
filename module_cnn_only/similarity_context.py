@@ -255,6 +255,14 @@ class GEVModule(nn.Module):
         else:
             vol = gwc
         vol = vol.permute(0, 1, 4, 2, 3).contiguous()  # [B,G or 2G,D,H,W]
+        self.build_from_cost_volume(vol, ref.mean(dim=-1), valid_mask)
+
+    def build_from_cost_volume(self, vol, ref_2d, valid_mask=None):
+        """融合代价[B,G,D,H,W]和CNN Guide[B,32,H,W]进入原GEV聚合。
+
+        不重新计算GWC；原Guided U-Net、1通道GEV、深度金字塔及参数键保持不变。
+        单网格build()与Yin/Yang前端共用这一实现，DA-V2不进入Guide。
+        """
         if valid_mask is not None:
             # Stereo: invalid 3D candidates carry neither GWC nor variance evidence.
             vol = torch.where(valid_mask, vol, 0.0)
@@ -264,7 +272,6 @@ class GEVModule(nn.Module):
             vol = F.avg_pool3d(vol, kernel_size=(1, 2, 2), stride=(1, 2, 2))
 
         # 5. Guide features from ref (averaged over depth)
-        ref_2d = ref.mean(dim=-1)  # [B, C, H, W] 取平均
         if self.use_spatial_downsample:
             ref_2d = F.avg_pool2d(ref_2d, kernel_size=2, stride=2)
 

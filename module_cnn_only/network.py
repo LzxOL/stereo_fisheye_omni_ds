@@ -1,6 +1,6 @@
 # module_cnn_only/network.py
-# CNN-only网络入口：保留原单网格双目/四目路径，并增加Yin-Yang双网格路径。
-# 双网格：CNN → 扫描/增强 → GWC/Warp/Fusion → 多通道3D聚合 → Lookup/ConvGRU。
+# 双目CNN/DA-V2主干 + 可选Yin-Yang匹配前端。
+# 两种映射共用原Context/State投影、Similarity/GEV Lookup、UpdateBlock和凸上采样。
 # Author: Adapted from ROmniStereo and BEVFormer
 
 import torch
@@ -419,7 +419,7 @@ class MotionEncoder(nn.Module):
         # Combine: sim(64) + dino(64) + gev(64) + depth(32) = 224 → hidden-1
         self.conv_out = nn.Conv2d(64 + 64 + 64 + 32, hidden_channels - 1, 3, padding=1)
 
-    def forward(self, sim_context, dino_feat, gev_feat, depth):  # 原单网格路径：把匹配查询、CNN Context 和当前索引编码成128通道运动特征。
+    def forward(self, sim_context, dino_feat, gev_feat, depth):  # 共用原主干：把Similarity、增强Context、GEV和当前索引编码为128通道运动特征。
         sim = F.relu(self.conv_sim1(sim_context))
         sim = F.relu(self.conv_sim2(sim))
 
@@ -468,7 +468,7 @@ class UpdateBlock(nn.Module):
         )
 
     def forward(self, net, similarity_profile, dino_feat, gev_feat, inv_depth,
-                no_upsample=False):  # 执行一轮原单网格更新：查询匹配特征、更新Hidden，返回索引增量和上采样权重。
+                no_upsample=False):  # 执行一轮共用GRU更新，返回Hidden、索引增量和上采样权重。
         """
         Args:
             net: [B, hidden_dim, H, W] - hidden state
@@ -502,12 +502,12 @@ class UpdateBlock(nn.Module):
 class OmniDS(nn.Module):
     """双目CNN入口：左参考Context仅初始化一次，所有GRU迭代共用。
 
-    use_yinyang=True时执行双网格扫描、增强、融合和共享深度优化；
-    否则使用单网格Similarity/GEV路径。两条路径都不按当前深度刷新Context。
+    use_yinyang=True只增加双网格匹配前端；两种模式共用原DA-V2 Context和GRU。
+    两条路径都只初始化一次静态Context，不按当前深度刷新。
     原始四目OmniDS使用module/network.py，不在此类中执行。
     """
 
-    def __init__(self, varargin=None, grid_package=None):  # 构造网络：创建共享CNN，再按use_yinyang选择双网格或原单网格模块。
+    def __init__(self, varargin=None, grid_package=None):  # 构造原CNN/DA-V2及GRU主干，可追加Yin-Yang匹配前端。
         super().__init__()
         opts = Edict()
         opts.use_rgb = False
@@ -535,7 +535,9 @@ class OmniDS(nn.Module):
         opts.use_student = False
         opts.use_group_variance = False
         opts.num_cams = 2
-        opts.use_yinyang = False  # True时走本类的双网格流程，旧模式保持默认。
+        opts.use_yinyang = False  # 在DA-V2/原GRU主干前增加双网格匹配前端。
+        opts.gru_iters = 12
+        opts.use_dav2_geometry = False
         self.opts = argparse(opts, varargin)
         if self.opts.num_cams != 2:
             raise ValueError('CNN-only now uses stereo static context; use module.network.OmniDS for four cameras')
@@ -552,11 +554,6 @@ class OmniDS(nn.Module):
             getattr(self.opts, 'encoder_downsample_twice', False)
         )
         
-        # 双网格使用各自原生H/W，不使用下方旧路径的单个ERP尺寸和单通道GEV。
-        if self.opts.use_yinyang:
-            self._init_yinyang(grid_package)
-            return
-
         # Compute downsampled ERP size
         factor = 2 ** self.opts.num_downsample
         self.erp_h = self.opts.equi_h // factor
@@ -619,40 +616,54 @@ class OmniDS(nn.Module):
         else:
             self.feature_student = None
 
+        # Register new parameters ONLY when enabled, after all baseline layers:
+        # old state_dict keys and seeded baseline initialization remain intact.
+        if self.opts.use_dav2_geometry:
+            if (self.opts.num_cams != 2 or self.opts.base_channel != 32 or
+                    not (self.opts.use_yinyang or self.opts.get('reference_grid') == 'left_fisheye')):
+                raise ValueError('DA-V2 geometry requires stereo, base_channel=32 and reference_grid=left_fisheye')
+            if self.opts.get('dav2_fusion_target', 'context') != 'context':
+                raise ValueError('This model uses DA-V2 Context fusion, not the previous GEV Guide fusion')
+            self.opts.dav2_fusion_target = 'context'
+            from module_cnn_only.dav2_geometry import DAV2GeometryContext, GeometryContextFusion
+            self.dav2_geometry = DAV2GeometryContext(self.opts.dav2_model_repo, self.opts.dav2_checkpoint)
+            self.geometry_fusion = GeometryContextFusion()
+
+        if self.opts.use_yinyang:
+            self._init_yinyang(grid_package)
         self.debug_outputs = {}
 
-    def _init_yinyang(self, grid_package):
-        """在原OmniDS中注册双网格模块；不创建旧Similarity/独立GEV分支。
-
-        共享encoder已在原构造函数创建；其余模块各只有一套参数。
-        """
+    def _init_yinyang(self, grid_package):  # 只增加几何匹配前端，Context/GEV/UpdateBlock仍用已训练主干。
         from module_cnn_only.geometry_refiner import GeometryAwareFeatureEnhancer
         from module_cnn_only.cross_grid_warp import BidirectionalCrossGridWarp
         from module_cnn_only.geometry_aware_fusion import GeometryAwareFeatureFusion
-        from module_cnn_only.depth_refinement import StereoDepthRefinement
 
-        if (self.opts.use_group_variance or
-                self.opts.get('encoder_downsample_twice', False) or self.opts.get('use_dav2_geometry', False)):
-            raise ValueError('Yin-Yang V1 uses the stride-2 CNN, static context and GWC only; no DA-V2')
-        refinement_options = dict(self.opts.get('yinyang_refinement', {}))
-        refinement_options.setdefault('context_channels', self.opts.base_channel)
-        depth_chunk = self.opts.get('depth_chunk', 8)
         self.grid_package = grid_package
         axis = torch.tensor(grid_package.metadata['inverse_depth_candidates'], dtype=torch.float32)
-        # 不重建EPS→rho_max轴：原192[::2]的96候选以几何包实际数值为准。
+        if len(axis) != self.opts.num_invdepth or self.opts.use_group_variance:
+            raise ValueError('Yin-Yang uses the same D-axis as the baseline and fused GWC without variance')
         self.register_buffer('inverse_depth_candidates', axis)
-        num_depth = refinement_options.pop('num_depth', self.opts.num_invdepth)
-        if num_depth != self.opts.num_invdepth or num_depth != len(axis):
-            raise ValueError('Network and grid package must use exactly the same candidate axis')
-        self.groups = refinement_options.get('gwc_groups', 8)
-        self.channels = refinement_options.get('context_channels', 32)
-        self.depth_chunk = depth_chunk
-        self.enhancer = GeometryAwareFeatureEnhancer(self.channels, depth_chunk=depth_chunk)
-        self.warp = BidirectionalCrossGridWarp(grid_package, depth_chunk)
-        self.fusion = GeometryAwareFeatureFusion(self.groups)
-        self.refinement = StereoDepthRefinement(num_depth=num_depth, **refinement_options)
+        self.depth_chunk = self.opts.get('depth_chunk', 8)
+        self.enhancer = GeometryAwareFeatureEnhancer(self.opts.base_channel, depth_chunk=self.depth_chunk)
+        self.warp = BidirectionalCrossGridWarp(grid_package, self.depth_chunk)
+        self.fusion = GeometryAwareFeatureFusion(self.gev_module.num_groups)
 
-        self.debug_outputs = {}
+    def load_baseline_weights(self, state_dict):  # 显式继承DA-V2主干权重，新增双网格模块保留自身初始化。
+        state = {key.removeprefix('module.'): value for key, value in state_dict.items()}
+        current = self.state_dict()
+        added = ('enhancer.', 'warp.', 'fusion.', 'inverse_depth_candidates')
+        shared = {key for key in current if not key.startswith(added)}
+        unused = {'view_weight_head.0.weight', 'view_weight_head.0.bias',
+                  'view_weight_head.2.weight', 'view_weight_head.2.bias'}
+        missing = shared - state.keys()
+        unexpected = state.keys() - shared - unused
+        if missing or unexpected:
+            raise ValueError(f'Baseline architecture differs: missing={sorted(missing)}, unexpected={sorted(unexpected)}')
+        # 只允许明确列出的旧闲置权重；其他键和所有Tensor Shape均严格校验。
+        current.update({key: state[key] for key in shared})
+        self.load_state_dict(current, strict=True)
+        return dict(inherited_keys=len(shared), initialized_keys=sorted(current.keys()-shared),
+                    removed_unused_keys=sorted(state.keys() & unused))
 
     def index_to_depth(self, indices, valid):
         """连续候选索引→(径向逆深度1/m,径向距离m)，无效像素均返回0。
@@ -668,49 +679,71 @@ class OmniDS(nn.Module):
         radial = rho.reciprocal()
         return rho.masked_fill(~valid, 0.), radial.masked_fill(~valid, 0.)
 
-    def _forward_yinyang(self, imgs, yang_to_yin_quality, yin_to_yang_quality, iters):  # 输入两张鱼眼和两路采样质量；输出Yin/Yang各自的初始化、逐轮预测和有效Mask。
-        """OmniDS双网格数据流，体统一[B,C,D,H,W]；保留各自原生H/W。
-
-        静态左Context单独采样；增强→GWC→双向Warp→Fusion→8通道聚合与GRU。
-        不调用独立网络入口；depth_refinement.py只负责复用的后半算法模块。
-        """
+    def _build_yinyang_volumes(self, features, yang_to_yin_quality, yin_to_yang_quality):  # 双网格只准备匹配体和左Context，不在这里做最终深度预测。
         from experiments.local_spherical_grid.adaptive_local_grid_v1 import sweep_patch, sample_reference
         from module_cnn_only.similarity_context import groupwise_correlation_volume
 
-        features = self.encoder(imgs)  # 原共享CNN，每Forward一次。
-        costs, masks, contexts, context_valid = {}, {}, {}, {}
+        branches, costs, masks = {}, {}, {}
         for name in ('yin', 'yang'):
             patch = getattr(self.grid_package, name)
             left, right, mask = sweep_patch(features, patch, self.depth_chunk)
             left, right = self.enhancer(left, right, patch.rays_ref, mask, patch.padding_valid)
-            # 原GWC函数用[B,C,H,W,D]；仅在接口处明确转换，内部数学计算不变。
-            # 原GWC只拆分C为groups/channels_per_group，可直接读取permute视图，
-            # 无需为两个巨大的32通道扫描体各做一次contiguous复制。
-            cost = groupwise_correlation_volume(left.permute(0, 1, 3, 4, 2),
-                                                right.permute(0, 1, 3, 4, 2), self.groups)
-            costs[name] = cost.permute(0, 1, 4, 2, 3).contiguous().masked_fill(~mask, 0.)
+            # 原Similarity接口使用[B,C,H,W,D]；代价融合接口使用[B,G,D,H,W]。
+            ref, target = [v.permute(0, 1, 3, 4, 2) for v in (left, right)]
+            lg = torch.as_tensor(patch.left_grid, device=left.device, dtype=torch.float32)
+            rg = torch.as_tensor(patch.right_grid, device=left.device, dtype=torch.float32).permute(1, 2, 0, 3)
+            grids = [lg[:, :, None].expand(-1, -1, self.opts.num_invdepth, -1), rg]
+            profile = self.similarity_context.build_profile(grids=grids, spherical_volumes=[ref, target], valid_mask=mask)
+            costs[name] = groupwise_correlation_volume(ref, target, self.gev_module.num_groups).permute(0, 1, 4, 2, 3).contiguous()
             masks[name] = mask
-            # 必须从未joint-mask的左CNN单独采样，不能取增强后左体的某个D切片。
-            contexts[name], context_valid[name] = sample_reference(features[0], patch)
+            context, left_valid = sample_reference(features[0], patch)
+            branches[name] = dict(profile=profile, profile_valid=mask, context=context, left_valid=left_valid,
+                                  left_grid=lg, guide=left.mean(dim=2))
 
         warped = self.warp(costs['yin'], costs['yang'], masks['yin'], masks['yang'])
         fused = self.fusion.forward_bidirectional(costs['yin'], costs['yang'], masks['yin'], masks['yang'],
                                                  warped, yang_to_yin_quality, yin_to_yang_quality)
-        result = {}
-        for name in ('yin', 'yang'):
-            output = self.refinement(fused['fused_' + name], contexts[name], fused[name + '_valid'],
-                                     context_valid[name], iters=iters)
-            output['inverse_depth'], output['radial_depth'] = self.index_to_depth(output['final_depth_idx'], output['valid'])
-            output['fusion_weights'] = fused[name + '_weights']
-            result[name] = output
-        return result
+        for name, branch in branches.items():
+            valid = fused[name+'_valid'] & branch['left_valid'].unsqueeze(2)
+            self.gev_module.build_from_cost_volume(fused['fused_'+name], branch.pop('guide'), valid)
+            # 两套缓存仅保存Tensor引用，共用同一GEV权重，不能让Yang覆盖Yin的查询体。
+            branch.update(candidate_valid=valid, gev_pyramid=self.gev_module._gev_pyramid,
+                          gev_valid=self.gev_module._valid_pyramid, fusion_weights=fused[name+'_weights'])
+        return branches
+
+    def _build_single_volume(self, features, grids, valid_mask, left_valid_mask):  # 原DA-V2双目前端，计算保持不变。
+        # 球面扫描前，整理特征和采样坐标，并确定哪些候选点、哪些像素可以参与后续计算。
+        batch = features[0].shape[0]
+        grids = [torch.as_tensor(g, device=features[0].device, dtype=torch.float32) for g in grids]
+        valid_mask = valid_mask.to(features[0].device)
+        for grid in grids:
+            visible = (torch.isfinite(grid).all(-1) & (grid.abs() <= 1).all(-1)).permute(2, 0, 1)
+            valid_mask = valid_mask & visible[None, None]
+        grids = [torch.where(torch.isfinite(g), g, 2.) for g in grids]
+        left_grid = grids[0][:, :, 0]
+        left_valid = (left_grid.abs() <= 1).all(-1)[None, None].expand(batch, -1, -1, -1)
+        if left_valid_mask is not None:
+            left_valid = left_valid & left_valid_mask.to(left_valid.device)
+            valid_mask = valid_mask & left_valid.unsqueeze(2)
+        volumes = spherical_sweep(features, grids)
+        profile, ref, target, camera_volumes = self.similarity_context.build_profile(
+            grids=grids, spherical_volumes=volumes, return_volumes=True, valid_mask=valid_mask,
+            use_triton=self.opts.get('use_triton', False))
+        self.gev_module.build(ref, target, camera_volumes, valid_mask=valid_mask,
+                              use_triton=self.opts.get('use_triton', False))
+        grid = left_grid[None].expand(batch, -1, -1, -1)
+        context = F.grid_sample(features[0], grid.to(features[0].dtype), padding_mode='zeros', align_corners=True)
+        context = context.masked_fill(~left_valid, 0.)
+        return dict(left=dict(profile=profile, profile_valid=valid_mask, context=context, left_valid=left_valid,
+                              left_grid=left_grid, candidate_valid=valid_mask,
+                              gev_pyramid=self.gev_module._gev_pyramid, gev_valid=self.gev_module._valid_pyramid))
 
     def freeze_bn(self):
         for m in self.modules():
             if isinstance(m, nn.BatchNorm2d):
                 m.eval()
     
-    def upsample_depth(self, depth, mask, valid_pixels=None):  # 原单网格路径的凸上采样：用3×3邻域恢复空间尺寸，双目模式不放大索引值。
+    def upsample_depth(self, depth, mask, valid_pixels=None):  # 共用凸上采样：用3×3邻域恢复空间尺寸，不放大候选索引值。
         """Upsample depth using convex combination."""
         B, C, H, W = depth.shape
         factor = 2 ** self.opts.num_downsample
@@ -736,164 +769,78 @@ class OmniDS(nn.Module):
     
 
 
-    def forward(self, imgs, grids=None, iters=None, test_mode=False, ocams=None, distilled=False, valid_mask=None, left_valid_mask=None,
-                yang_to_yin_quality=None, yin_to_yang_quality=None):  # 网络总入口：双网格执行扫描、增强、融合和GRU优化；否则执行原Similarity/GEV流程。
+    def forward(self, imgs, grids=None, iters=None, test_mode=False, ocams=None, distilled=False,
+                valid_mask=None, left_valid_mask=None, dav2_rgb=None,
+                yang_to_yin_quality=None, yin_to_yang_quality=None):  # 匹配前端之后统一执行DA-V2融合、原Context/State投影和原GRU。
+        """双网格只改变前端映射和代价融合，后半部分沿用DA-V2 Baseline。
+
+        dav2_rgb为真实左RGB的官方预处理结果。Yin/Yang返回各自原生网格的
+        2倍空间预测；索引单位始终[0,D-1]。单网格训练/推理接口不变。
         """
-        use_yinyang=True时：使用构造函数中的grid_package，grids不传。
-        yang_to_yin_quality / yin_to_yang_quality位于各自目标网格[B,1,D,H,W]。
-        训练返回两chart的完整dict；test_mode=True返回{yin:final_idx, yang:final_idx}。
-        默认3轮，可用iters覆盖；不做跨网格Resize或索引乘2。
+        iters = self.opts.gru_iters if iters is None else iters
+        device_type = imgs[0].device.type
+        enabled = self.opts.mixed_precision or torch.is_autocast_enabled(device_type)
+        with torch.autocast(device_type=device_type, enabled=enabled):
+            features = self.encoder(imgs)
+            if not self.opts.mixed_precision and not torch.is_autocast_enabled(device_type):
+                features = [feature.float() for feature in features]
+            # 这里仅准备前端数据；两种模式都继续执行下面同一套DA-V2/GRU主干。
+            if self.opts.use_yinyang:
+                branches = self._build_yinyang_volumes(features, yang_to_yin_quality, yin_to_yang_quality)
+            else:
+                branches = self._build_single_volume(features, grids, valid_mask, left_valid_mask)
 
-        原模式：separate GEV + Similarity Context，未传iters时仍为12轮。
+            patch_feature = None
+            if self.opts.use_dav2_geometry and self.opts.use_yinyang:
+                patch_feature = self.dav2_geometry.extract_features(dav2_rgb)
+            result = {}
+            self.debug_outputs = {}
+            for name, branch in branches.items():
+                cnn_context = branch['context']
+                left_valid = branch['left_valid']
+                candidate_valid = branch['candidate_valid']
+                pixels = candidate_valid.any(dim=2)
+                if self.opts.use_dav2_geometry:
+                    geometry = self.dav2_geometry(
+                        dav2_rgb, branch['left_grid'], imgs[0].shape[-2:], features[0].shape[-2:],
+                        left_valid, patch_feature=patch_feature)
+                    cnn_context = self.geometry_fusion(cnn_context, geometry, left_valid)
 
-        Stereo: imgs=[left,right], grids=[left_grid,right_grid]; the left grid is
-        repeated along D. valid_mask is required and includes both cameras' FOV
-        and invalid-pixel masks. Outputs are continuous indices in the SAME D-axis
-        at twice the spatial resolution, not metric depth or horizontal disparity.
-        left_valid_mask: optional bool [B,1,H,W] for static left-only context.
-        Include the camera invalid_mask here unless invisible left pixels are
-        already encoded as out-of-range coordinates in the left grid.
-        """
-        # 双网格iters=None由refinement使用配置中的默认轮数。
-        if self.opts.use_yinyang:
-            # 支持opts.mixed_precision及外层autocast；几何采样仍由原函数保持FP32。
-            device_type = imgs[0].device.type
-            enabled = self.opts.mixed_precision or torch.is_autocast_enabled(device_type)
-            with torch.autocast(device_type=device_type, enabled=enabled):
-                result = self._forward_yinyang(imgs, yang_to_yin_quality, yin_to_yang_quality, iters)
-            if test_mode:
-                return {name: row['final_depth_idx'] for name, row in result.items()}
-            return result
-        iters = 12 if iters is None else iters
-        with autocast(enabled=self.opts.mixed_precision):
-            # CNN-ONLY: keep forward signature, but never execute DINO or its student.
-            if distilled:
-                raise ValueError("CNN-only does not support distilled=True")
-            cnn_feats = self.encoder(imgs)  # Original encoder, computed once for all iterations.
+                # 恢复已训练的两路投影：同一增强Context同时初始化Context和Hidden。
+                context = torch.relu(self.context_proj(cnn_context)).masked_fill(~left_valid, 0.)
+                net = torch.tanh(self.state_proj(cnn_context)).masked_fill(~left_valid, 0.)
+                initial = torch.full((imgs[0].shape[0], 1, *context.shape[-2:]), self.opts.num_invdepth / 2,
+                                     device=context.device, dtype=features[0].dtype)
+                current = initial
+                predictions, native_predictions = [], []
+                self.gev_module._gev_pyramid = branch['gev_pyramid']
+                self.gev_module._valid_pyramid = branch['gev_valid']
+                self.similarity_context._candidate_valid = branch['profile_valid']
+                for itr in range(iters):
+                    current = current.detach()
+                    gev_feature = self.gev_module.lookup(current, radius=self._gev_radius)
+                    net, delta, up_mask = self.update_block(net, branch['profile'], context, gev_feature, current,
+                                                            no_upsample=test_mode and itr < iters-1)
+                    current = (current + delta).clamp(0, self.opts.num_invdepth-1).masked_fill(~pixels, 0.)
+                    net = net.masked_fill(~pixels, 0.)
+                    native_predictions.append(current)
+                    if up_mask is not None:
+                        prediction = self.upsample_depth(current, up_mask, pixels).clamp(0, self.opts.num_invdepth-1)
+                        output_valid = F.interpolate(pixels.float(), scale_factor=2**self.opts.num_downsample, mode='nearest').bool()
+                        predictions.append(prediction.masked_fill(~output_valid, 0.))
+                row = dict(predictions=predictions, native_predictions=native_predictions,
+                           init_depth_idx=initial.masked_fill(~pixels, 0.), final_depth_idx=predictions[-1],
+                           valid=output_valid, native_valid=pixels, candidate_valid=candidate_valid,
+                           gev_volume=branch['gev_pyramid'][0])
+                if self.opts.use_yinyang:
+                    row['inverse_depth'], row['radial_depth'] = self.index_to_depth(row['final_depth_idx'], output_valid)
+                    row['fusion_weights'] = branch['fusion_weights']
+                result[name] = row
+                self.debug_outputs[name] = dict(context=list(context.shape), hidden=list(net.shape),
+                                                gev=list(branch['gev_pyramid'][0].shape), prediction=list(predictions[-1].shape))
 
-        if not self.opts.mixed_precision:
-            cnn_feats = [feat.float() for feat in cnn_feats]
-        B = cnn_feats[0].shape[0]
-
-        left_feature = cnn_feats[0]  # 静态Context只需要左参考CNN特征。
-
-        grids_tensor = [g if torch.is_tensor(g) else torch.tensor(g, device=cnn_feats[0].device)
-                        for g in grids]
-        valid_pixels = None
-        context_valid = None
-        if self.opts.num_cams == 2:
-            grids_tensor = [g.to(device=left_feature.device, dtype=torch.float32) for g in grids_tensor]
-            valid_mask = valid_mask.to(left_feature.device)
-            for g in grids_tensor:
-                visible = (torch.isfinite(g).all(-1) & (g.abs() <= 1).all(-1)).permute(2, 0, 1)
-                valid_mask = valid_mask & visible[None, None]
-            # Sanitise invalid coordinates before grid_sample; NaN padding can poison backward.
-            grids_tensor = [torch.where(torch.isfinite(g), g, 2.0) for g in grids_tensor]
-            valid_pixels = valid_mask.any(dim=2)
-            left_grid = grids_tensor[0][:, :, 0]
-            context_valid = (torch.isfinite(left_grid).all(-1) & (left_grid.abs() <= 1).all(-1))[None, None]
-            context_valid = context_valid.expand(B, -1, -1, -1)
-            if left_valid_mask is not None:
-                left_valid_mask = left_valid_mask.to(context_valid.device)
-                context_valid = context_valid & left_valid_mask
-                # Left-invalid pixels cannot contribute matching evidence either.
-                valid_mask = valid_mask & left_valid_mask.unsqueeze(2)
-                valid_pixels = valid_mask.any(dim=2)
-
-        # CNN-ONLY: no DINO dtype/device dependency.
-
-        # 3. Build spherical volumes for similarity
-        use_dino_sim = getattr(self.opts, 'use_dino_sim', False)
-
-        with autocast(enabled=self.opts.mixed_precision):
-            # CNN-ONLY: always sweep CNN matching features.
-            # if use_dino_sim:
-            #     # DINO-only sim: use DINO features for spherical sweep
-            #     dino_feats_list = [dino_feats_stacked[:, i] for i in range(4)]
-            #     sim_sph = spherical_sweep(dino_feats_list, grids_tensor)
-            #     del dino_feats_list
-            # else:
-            #     # CNN-only sim (default)
-            #     sim_sph = spherical_sweep(cnn_feats, grids_tensor)
-            sim_sph = spherical_sweep(cnn_feats, grids_tensor)
-            del cnn_feats
-
-            # 4. 类PDF-OMni 操作；得到 Reference Volume、Target Volume、similarity_profile(Reference × Target：通道点积相关性 -> 2D Spatial Aggregation)
-            similarity_profile, ref, tgt, cam_vols = \
-                self.similarity_context.build_profile(
-                    grids=grids_tensor, spherical_volumes=sim_sph,
-                    return_volumes=True,
-                    use_triton=self.opts.get('use_triton', False),
-                    valid_mask=valid_mask,
-                )
-
-            # 5. Build independent GEV from ref/tgt volumes  计算 GWC + Feature Variance
-            self.gev_module.build(ref, tgt, cam_vols,
-                                  use_triton=self.opts.get('use_triton', False), valid_mask=valid_mask)
-            del ref, tgt, cam_vols, sim_sph
-
-        # Initialize depth at D_grid / 2
-        D_grid = grids_tensor[0].shape[2]
-        inv_depth_idx = torch.zeros(B, 1, self.erp_h, self.erp_w,
-                                    device=left_feature.device,
-                                    dtype=left_feature.dtype)
-        inv_depth_idx = inv_depth_idx + D_grid / 2
-
-        # 只在迭代前采样一次左参考Context，网格沿D不变，因此取第0层。
-        with autocast(enabled=self.opts.mixed_precision):
-            grid = grids_tensor[0][:, :, 0].unsqueeze(0).expand(B, -1, -1, -1)
-            cnn_erp = F.grid_sample(left_feature, grid.to(left_feature.dtype),
-                                    padding_mode='zeros', align_corners=True)
-            cnn_erp = torch.where(context_valid, cnn_erp, 0.0)
-            if not self.opts.mixed_precision:
-                cnn_erp = cnn_erp.float()
-
-            # CNN-ONLY: fused_erp = self.context_fuser(dino_erp, cnn_erp)
-
-            context = torch.relu(self.context_proj(cnn_erp))
-            net = torch.tanh(self.state_proj(cnn_erp))
-            if valid_pixels is not None:
-                context = torch.where(context_valid, context, 0.0)
-                net = torch.where(context_valid, net, 0.0)
-
-        # Iterative refinement
-        predictions = []
-
-        for itr in range(iters):
-            inv_depth_idx = inv_depth_idx.detach()
-
-            # Context保持固定；当前索引仍每轮用于匹配体Lookup，Hidden持续递归。
-            # GEV lookup at current depth
-            gev_feat = self.gev_module.lookup(inv_depth_idx, radius=self._gev_radius)
-
-            with autocast(enabled=self.opts.mixed_precision):
-                # CNN-ONLY: the legacy dino_feat argument in UpdateBlock receives CNN context.
-                net, delta_depth, up_mask = self.update_block(
-                    net, similarity_profile, context, gev_feat, inv_depth_idx,
-                    no_upsample=(test_mode and itr < iters - 1)
-                )
-
-            inv_depth_idx = inv_depth_idx + delta_depth
-            if valid_pixels is not None:
-                inv_depth_idx = torch.where(valid_pixels, inv_depth_idx.clamp(0, D_grid - 1), 0.0)
-                net = torch.where(valid_pixels, net, 0.0)
-
-            if up_mask is not None:
-                inv_depth_up = self.upsample_depth(inv_depth_idx, up_mask, valid_pixels)
-                if valid_pixels is not None:
-                    inv_depth_up = inv_depth_up.clamp(0, D_grid - 1)
-                    output_valid = F.interpolate(valid_pixels.float(), scale_factor=2 ** self.opts.num_downsample,
-                                                 mode='nearest').bool()
-                    inv_depth_up = torch.where(output_valid, inv_depth_up, 0.0)
-                predictions.append(inv_depth_up)
-
-        self.debug_outputs = {}
-
-        # Clear all caches
         self.gev_module.clear_cache()
         self.similarity_context._candidate_valid = None
-
-        if test_mode:
-            return torch.clamp(predictions[-1], 0, self.opts.num_invdepth - 1)
-
-        return predictions
+        if self.opts.use_yinyang:
+            return {name: row['final_depth_idx'] for name, row in result.items()} if test_mode else result
+        return result['left']['final_depth_idx'] if test_mode else result['left']['predictions']

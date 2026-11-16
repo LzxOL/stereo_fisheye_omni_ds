@@ -55,6 +55,10 @@ parser.add_argument('--sweep_azimuth_span_deg', type=float, default=130.)
 parser.add_argument('--sweep_elevation_min_deg', type=float, default=-45.)
 parser.add_argument('--sweep_elevation_max_deg', type=float, default=45.)
 parser.add_argument('--use_group_variance', action='store_true', help='stereo ablation: restore GWC + variance')
+parser.add_argument('--use_dav2_geometry', action='store_true', help='frozen DA-V2 tokens enhance CNN Context and GRU hidden initialization')
+parser.add_argument('--dav2_model_repo', default='/cache/models/Depth-Anything-V2', help='official DA-V2 source checkout')
+parser.add_argument('--dav2_checkpoint', default='/cache/models/depth_anything_v2_vitb.pth', help='official DA-V2 Base weights')
+parser.add_argument('--dav2_input_size', type=int, default=518, help='official resize lower bound, rounded to multiples of 14')
 parser.add_argument('--val_count', type=int, default=512, help='stereo held-out official-training frames')
 parser.add_argument('--seed', type=int, default=0, help='stereo split and training seed')
 parser.add_argument('--gt_width', type=int, help='select complete raw GT TIFF width when multiple versions exist')
@@ -172,11 +176,17 @@ if args.stereo:
         parser.error('Smoke limits must be positive, val_count nonnegative')
     if args.reference_grid == 'left_fisheye' and args.sweep_azimuth_center_deg is not None:
         parser.error('A left-fisheye pixel grid has no ERP azimuth centre')
+    if args.use_dav2_geometry and (args.reference_grid != 'left_fisheye' or args.base_channel != 32):
+        parser.error('--use_dav2_geometry requires --reference_grid left_fisheye and base_channel=32')
     if args.name == parser.get_default('name'):
-        args.name = 'OmniDS_Stereo_Basic'
+        args.name = 'OmniDS_Stereo_DAV2_Context' if args.use_dav2_geometry else 'OmniDS_Stereo_Basic'
 elif (args.ref_cam or args.target_cam or args.max_train_steps is not None or args.max_eval_samples is not None
       or args.reference_grid != 'local_erp'):
     parser.error('Camera-pair and bounded-smoke options require --stereo')
+if args.use_dav2_geometry:
+    if not args.stereo or args.dav2_input_size < 14:
+        parser.error('--use_dav2_geometry requires --stereo and dav2_input_size>=14')
+    from module_cnn_only.dav2_geometry import prepare_dav2_rgb
 
 if args.cnn_only and not args.stereo:
     parser.error('--cnn_only uses stereo static context; add --stereo and camera pair, or use original four-camera OmniDS without --cnn_only')
@@ -223,6 +233,13 @@ opts.net_opts.fix_bn = args.fix_bn
 if args.stereo:
     opts.net_opts.num_cams = 2
     opts.net_opts.use_group_variance = args.use_group_variance
+    opts.net_opts.reference_grid = args.reference_grid
+    opts.net_opts.use_dav2_geometry = args.use_dav2_geometry
+    if args.use_dav2_geometry:
+        opts.net_opts.dav2_fusion_target = 'context'
+        opts.net_opts.dav2_model_repo = args.dav2_model_repo
+        opts.net_opts.dav2_checkpoint = args.dav2_checkpoint
+        opts.net_opts.dav2_input_size = args.dav2_input_size
 # ERP / cross-attention
 opts.net_opts.equi_h = args.equirect_size[0]
 opts.net_opts.equi_w = args.equirect_size[1]
@@ -282,6 +299,9 @@ def fetch_optimizer(model, num_steps):
 
 
 def train(epoch_total, load_state):
+    if args.use_dav2_geometry and not load_state and osp.isdir(opts.model_dir):
+        if any(name.endswith('.pth') for name in os.listdir(opts.model_dir)):
+            raise ValueError('DA-V2 run already has checkpoints; choose a new --name or explicitly restore')
     if args.stereo:
         from dataset_stereo import StereoDataset
         torch.manual_seed(args.seed)
@@ -313,6 +333,8 @@ def train(epoch_total, load_state):
     LOG_INFO(f"  GEV groups: {opts.net_opts.gev_num_groups}, reg_channels: {opts.net_opts.gev_reg_channels}")
     LOG_INFO(f"  GEV pyramid: {opts.net_opts.gev_num_pyramid_levels} levels, radius {opts.net_opts.gev_radius}")
     net = nn.DataParallel(OmniDS(opts.net_opts)).cuda()
+    if args.use_dav2_geometry:
+        LOG_INFO('DA-V2: frozen ViT-B blocks [2,5,8,11], trainable Context fusion before context/state heads; GEV unchanged')
     if opts.net_opts.fix_bn:
         net.module.freeze_bn()
     LOG_INFO("Parameter Count: %d" % count_parameters(net))
@@ -342,6 +364,12 @@ def train(epoch_total, load_state):
                 for key in ('use_group_variance',):
                     if snapshot['net_opts'].get(key) != opts.net_opts[key]:
                         raise ValueError(f'Restore checkpoint {key} differs; pass the matching ablation switch')
+                if snapshot['net_opts'].get('use_dav2_geometry', False) != args.use_dav2_geometry:
+                    raise ValueError('Restore checkpoint DA-V2 geometry mode differs; weights load strictly')
+                if args.use_dav2_geometry and snapshot['net_opts'].get('dav2_fusion_target', 'guide') != 'context':
+                    raise ValueError('Previous DA-V2 GEV Guide checkpoint is not a Context-fusion checkpoint')
+                if args.use_dav2_geometry and snapshot['net_opts'].get('dav2_input_size', 518) != args.dav2_input_size:
+                    raise ValueError('Restore checkpoint DA-V2 preprocessing size differs')
             if 'net_state_dict' in snapshot.keys():
                 net.load_state_dict(snapshot['net_state_dict'])
                 LOG_INFO('checkpoint %s is loaded' % (opts.snapshot_path))
@@ -370,8 +398,16 @@ def train(epoch_total, load_state):
                 raise ValueError('CNN-only requires a CNN-only checkpoint; original DINO checkpoints are incompatible')
             if args.stereo and snapshot.get('net_opts', {}).get('num_cams') != 2:
                 raise ValueError('Stereo pretraining requires a two-camera checkpoint; weights load strictly')
+            if args.stereo and snapshot['net_opts'].get('use_dav2_geometry', False) != args.use_dav2_geometry:
+                raise ValueError('Pretrain checkpoint DA-V2 mode differs; partial/silent weight loading is not supported')
+            if args.use_dav2_geometry and snapshot['net_opts'].get('dav2_fusion_target', 'guide') != 'context':
+                raise ValueError('Pretrain checkpoint uses previous DA-V2 Guide fusion, not Context fusion')
             if 'net_state_dict' in snapshot.keys():
-                net.load_state_dict(snapshot['net_state_dict'])
+                if args.cnn_only:
+                    transfer = net.module.load_baseline_weights(snapshot['net_state_dict'])
+                    LOG_INFO(f'Explicit baseline weight transfer: {transfer}')
+                else:
+                    net.load_state_dict(snapshot['net_state_dict'])
                 LOG_INFO('checkpoint %s is loaded' % (opts.pretrain_path))
         elif opts.snapshot_path is None:
             sys.exit('%s do not exsits' % (opts.snapshot_path))
@@ -417,9 +453,11 @@ def train(epoch_total, load_state):
             ocams = getattr(data, 'ocams', None)
             if args.stereo:
                 batch = imgs[0].shape[0]
+                dav2_rgb = (prepare_dav2_rgb(raw_imgs[0], args.dav2_model_repo, args.dav2_input_size).cuda()
+                            if args.use_dav2_geometry else None)
                 predictions = net.module.forward(imgs, grids, iters=opts.train_iters,
                                                   valid_mask=candidate_mask.expand(batch, -1, -1, -1, -1),
-                                                  left_valid_mask=left_mask.expand(batch, -1, -1, -1))
+                                                  left_valid_mask=left_mask.expand(batch, -1, -1, -1), dav2_rgb=dav2_rgb)
             elif args.cnn_only:
                 predictions = net.module.forward(imgs, grids, iters=opts.train_iters, ocams=ocams)
             else:
@@ -521,8 +559,10 @@ def train(epoch_total, load_state):
                 ocams = getattr(data, 'ocams', None)
                 with torch.no_grad():
                     if args.stereo:
+                        dav2_rgb = (prepare_dav2_rgb(raw_imgs[0][None], args.dav2_model_repo, args.dav2_input_size).cuda()
+                                    if args.use_dav2_geometry else None)
                         invdepth_idx = net_eval(imgs, grids, test_mode=True, iters=opts.train_iters,
-                                               valid_mask=candidate_mask, left_valid_mask=left_mask)
+                                               valid_mask=candidate_mask, left_valid_mask=left_mask, dav2_rgb=dav2_rgb)
                     elif args.cnn_only:
                         invdepth_idx = net_eval(imgs, grids, test_mode=True, iters=opts.train_iters)
                     else:

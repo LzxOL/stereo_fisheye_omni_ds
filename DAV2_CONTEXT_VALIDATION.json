@@ -1,0 +1,1736 @@
+{
+  "date": "2026-11-12",
+  "version": "DA-V2_Context_v1",
+  "fusion_target": "context_and_state",
+  "alpha_initial": 0.1,
+  "source_sha256": {
+    "module_cnn_only/network.py": "faa9023db788b90a89c439c8a8850db615b969cefe92d9b24daac15158eff1dc",
+    "module_cnn_only/dav2_geometry.py": "e7064d3a6737c7969a4da691b66c80fa258f148379ac0e356deae25c07c8af7c",
+    "module_cnn_only/similarity_context.py": "b26c609934d414ae6e3efe40b3999666b9fa2200479d33c85283e89d726869e1",
+    "dataset_stereo.py": "db5873d79b9c3abe94d597ab3cd4678acf1c8a299402453c5cf862bc3dd0d98b",
+    "train.py": "03eaee94590cb5a3b16893f3cfbf028110c21ba4e8878c910fae4337456fdf7f",
+    "tools/smoke_dav2_geometry.py": "40a234b4b513e9adb36555ababb2451e99930405e03150ec1c1987a22b4dd8fe"
+  },
+  "official_commit": "a561b849ebae10a6f5ef49e26c83cbbcd36c71bf",
+  "official_checkpoint_sha256": "0d2b7002e62d39d655571c371333340bd88f67ab95050c03591555aa05645328",
+  "environment": {
+    "torch": "2.8.0+cu128",
+    "gpu": "RTX 5090",
+    "test_gpu_index": 3,
+    "mixed_precision": true,
+    "backbone_dtype": "float32",
+    "cudnn_benchmark": false,
+    "cudnn_deterministic": true,
+    "shared_gpu": true
+  },
+  "geometry": {
+    "reference": "cam4",
+    "target": "cam3",
+    "image_size": [
+      768,
+      800
+    ],
+    "sweep_size": [
+      160,
+      240
+    ],
+    "output_size": [
+      320,
+      480
+    ],
+    "reference_grid": "left_fisheye",
+    "reference_pixel_bounds": [
+      0,
+      799,
+      0,
+      767
+    ],
+    "grid_convention": "full_left_fisheye_pixels_output_linspace_strided_2_CNN_stride2_centres",
+    "index_units": "continuous_working_candidate_0_to_D_minus_1",
+    "inverse_depth_values": [
+      2.220446049250313e-16,
+      0.006346184356655781,
+      0.01269236871331134,
+      0.0190385530699669,
+      0.025384737426622457,
+      0.031730921783278014,
+      0.03807710613993358,
+      0.044423290496589135,
+      0.05076947485324469,
+      0.05711565920990025,
+      0.0634618435665558,
+      0.06980802792321136,
+      0.07615421227986693,
+      0.08250039663652249,
+      0.08884658099317805,
+      0.0951927653498336,
+      0.10153894970648916,
+      0.10788513406314472,
+      0.11423131841980028,
+      0.12057750277645583,
+      0.1269236871331114,
+      0.13326987148976696,
+      0.1396160558464225,
+      0.14596224020307808,
+      0.15230842455973365,
+      0.1586546089163892,
+      0.16500079327304476,
+      0.1713469776297003,
+      0.17769316198635587,
+      0.18403934634301142,
+      0.190385530699667,
+      0.19673171505632253,
+      0.2030778994129781,
+      0.20942408376963367,
+      0.21577026812628922,
+      0.2221164524829448,
+      0.22846263683960033,
+      0.2348088211962559,
+      0.24115500555291144,
+      0.24750118990956702,
+      0.25384737426622256,
+      0.26019355862287813,
+      0.2665397429795337,
+      0.27288592733618927,
+      0.2792321116928448,
+      0.28557829604950036,
+      0.29192448040615593,
+      0.2982706647628115,
+      0.30461684911946707,
+      0.3109630334761226,
+      0.31730921783277816,
+      0.3236554021894337,
+      0.3300015865460893,
+      0.3363477709027448,
+      0.3426939552594004,
+      0.34904013961605596,
+      0.3553863239727115,
+      0.3617325083293671,
+      0.3680786926860226,
+      0.3744248770426782,
+      0.38077106139933375,
+      0.3871172457559893,
+      0.39346343011264484,
+      0.3998096144693004,
+      0.406155798825956,
+      0.41250198318261155,
+      0.4188481675392671,
+      0.42519435189592264,
+      0.4315405362525782,
+      0.4378867206092338,
+      0.44423290496588935,
+      0.45057908932254487,
+      0.45692527367920044,
+      0.463271458035856,
+      0.4696176423925116,
+      0.47596382674916715,
+      0.48231001110582267,
+      0.48865619546247824,
+      0.4950023798191338,
+      0.5013485641757893,
+      0.5076947485324449,
+      0.5140409328891005,
+      0.520387117245756,
+      0.5267333016024116,
+      0.5330794859590672,
+      0.5394256703157227,
+      0.5457718546723783,
+      0.5521180390290338,
+      0.5584642233856894,
+      0.5648104077423449,
+      0.5711565920990005,
+      0.5775027764556561,
+      0.5838489608123116,
+      0.5901951451689672,
+      0.5965413295256228,
+      0.6028875138822783
+    ],
+    "gt_phi": 90.0,
+    "check_occlusion": true,
+    "occlusion_scope": "observed_Rig_point_cloud_only",
+    "official_train_count": 9216,
+    "official_test_count": 1024,
+    "split_seed": 0
+  },
+  "full_size": {
+    "disabled_regression": {
+      "seed_initialization_exact": true,
+      "state_dict_keys_exact": true,
+      "strict_legacy_load": true,
+      "cpu_training_outputs_exact": true,
+      "cpu_gradients_exact": true,
+      "gpu_inference_exact": true,
+      "dav2_not_imported": true
+    },
+    "alignment": {
+      "official_rgb_preprocess_exact": true,
+      "prepared_shape": [
+        1,
+        3,
+        518,
+        546
+      ],
+      "original_pixel_ramp_max_error": 0.00018310546875,
+      "wrong_cnn_grid_error": 1.44610595703125,
+      "patch_size": 14,
+      "blocks": [
+        2,
+        5,
+        8,
+        11
+      ]
+    },
+    "baseline": {
+      "enabled": false,
+      "training_steps": 3,
+      "shapes": {
+        "cnn": [
+          [
+            1,
+            32,
+            384,
+            400
+          ],
+          [
+            1,
+            32,
+            384,
+            400
+          ]
+        ],
+        "similarity_profile": [
+          1,
+          96,
+          160,
+          240
+        ],
+        "guide0": [
+          1,
+          16,
+          80,
+          120
+        ],
+        "guide1": [
+          1,
+          32,
+          80,
+          120
+        ],
+        "guide2": [
+          1,
+          48,
+          80,
+          120
+        ],
+        "gev": [
+          1,
+          1,
+          96,
+          80,
+          120
+        ],
+        "gwc_unet_input": [
+          1,
+          8,
+          96,
+          80,
+          120
+        ],
+        "guide_multiscale": [
+          [
+            1,
+            16,
+            80,
+            120
+          ],
+          [
+            1,
+            32,
+            40,
+            60
+          ],
+          [
+            1,
+            48,
+            20,
+            30
+          ]
+        ],
+        "context_projection": [
+          1,
+          32,
+          160,
+          240
+        ],
+        "hidden_init": [
+          1,
+          64,
+          160,
+          240
+        ],
+        "motion": [
+          1,
+          128,
+          160,
+          240
+        ],
+        "gru": [
+          1,
+          64,
+          160,
+          240
+        ],
+        "gru_input": [
+          1,
+          160,
+          160,
+          240
+        ],
+        "predictions": [
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ]
+        ]
+      },
+      "calls": {
+        "cnn": 3,
+        "similarity_profile": 3,
+        "guide0": 3,
+        "guide1": 3,
+        "guide2": 3,
+        "gev": 3,
+        "context_projection": 3,
+        "hidden_init": 3,
+        "motion": 36,
+        "gru": 36
+      },
+      "first_matching_hashes": {
+        "similarity_profile": "c66fca838898dc0ca2d30894ba59a1dd7a6b06b4e6b188912808bb22f55fda8b",
+        "gwc_unet_input": "92b77ef896568a64582522223f91fe8f3e7ae29a5868b20fb042b81037475474",
+        "cnn_guides": [
+          "6836b70b0221726e30d47ee303fd2bbf70d250a8034c0302c6160198ea4905b8",
+          "784d1201921de317f83330e042647db18efd3a915480c478ed2af4ec274af96c",
+          "2b7a3caf71f681e79b40f54c3e67a45eba2c737c0e8d474f9ec9b2df04165216"
+        ],
+        "gev": "48d5bf01568a2891361effc5a973de63e2dc0dd3a8c9d5edfa54657f0f0b48be"
+      },
+      "routing_hashes": {},
+      "trainable_parameters": 1577432,
+      "frozen_parameters": 0,
+      "losses": [
+        224.5062255859375,
+        203.15245056152344,
+        136.06378173828125
+      ],
+      "gradient_l1": {
+        "cnn": 1025.52240199456,
+        "gev": 11.105431267176755,
+        "gru": 3253.042581990361
+      },
+      "optimizer_updates": 3,
+      "step_seconds": [
+        1.897146901115775,
+        0.943000643979758,
+        0.43191587179899216
+      ],
+      "rgb_prepare_seconds": [
+        4.434492439031601e-05,
+        4.970794543623924e-05,
+        4.26596961915493e-05
+      ],
+      "peak_allocated_mib": 4714.50439453125,
+      "validation_frames": [
+        2,
+        37
+      ],
+      "validation_errors": [
+        95.45492147998183,
+        86.67912612803951,
+        77.5353098867817,
+        14.88645076751709,
+        18.467710971832275
+      ],
+      "validation_seconds": 0.6531713670119643
+    },
+    "dav2_geometry": {
+      "enabled": true,
+      "training_steps": 3,
+      "shapes": {
+        "cnn": [
+          [
+            1,
+            32,
+            384,
+            400
+          ],
+          [
+            1,
+            32,
+            384,
+            400
+          ]
+        ],
+        "similarity_profile": [
+          1,
+          96,
+          160,
+          240
+        ],
+        "guide0": [
+          1,
+          16,
+          80,
+          120
+        ],
+        "guide1": [
+          1,
+          32,
+          80,
+          120
+        ],
+        "guide2": [
+          1,
+          48,
+          80,
+          120
+        ],
+        "gev": [
+          1,
+          1,
+          96,
+          80,
+          120
+        ],
+        "gwc_unet_input": [
+          1,
+          8,
+          96,
+          80,
+          120
+        ],
+        "guide_multiscale": [
+          [
+            1,
+            16,
+            80,
+            120
+          ],
+          [
+            1,
+            32,
+            40,
+            60
+          ],
+          [
+            1,
+            48,
+            20,
+            30
+          ]
+        ],
+        "geometry_context": [
+          1,
+          32,
+          160,
+          240
+        ],
+        "enhanced_context": [
+          1,
+          32,
+          160,
+          240
+        ],
+        "context_projection": [
+          1,
+          32,
+          160,
+          240
+        ],
+        "hidden_init": [
+          1,
+          64,
+          160,
+          240
+        ],
+        "motion": [
+          1,
+          128,
+          160,
+          240
+        ],
+        "gru": [
+          1,
+          64,
+          160,
+          240
+        ],
+        "gru_input": [
+          1,
+          160,
+          160,
+          240
+        ],
+        "predictions": [
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ],
+          [
+            1,
+            1,
+            320,
+            480
+          ]
+        ]
+      },
+      "calls": {
+        "cnn": 3,
+        "similarity_profile": 3,
+        "guide0": 3,
+        "guide1": 3,
+        "guide2": 3,
+        "gev": 3,
+        "geometry_context": 3,
+        "enhanced_context": 3,
+        "context_projection": 3,
+        "hidden_init": 3,
+        "motion": 36,
+        "gru": 36
+      },
+      "first_matching_hashes": {
+        "similarity_profile": "c66fca838898dc0ca2d30894ba59a1dd7a6b06b4e6b188912808bb22f55fda8b",
+        "gwc_unet_input": "92b77ef896568a64582522223f91fe8f3e7ae29a5868b20fb042b81037475474",
+        "cnn_guides": [
+          "6836b70b0221726e30d47ee303fd2bbf70d250a8034c0302c6160198ea4905b8",
+          "784d1201921de317f83330e042647db18efd3a915480c478ed2af4ec274af96c",
+          "2b7a3caf71f681e79b40f54c3e67a45eba2c737c0e8d474f9ec9b2df04165216"
+        ],
+        "gev": "48d5bf01568a2891361effc5a973de63e2dc0dd3a8c9d5edfa54657f0f0b48be"
+      },
+      "routing_hashes": {
+        "enhanced_context": "13dc3b53d08e50365837e10365a6e022b1ef2253b4449fb4e6f08ed13b68d96a",
+        "context_head_input": "13dc3b53d08e50365837e10365a6e022b1ef2253b4449fb4e6f08ed13b68d96a",
+        "state_head_input": "13dc3b53d08e50365837e10365a6e022b1ef2253b4449fb4e6f08ed13b68d96a"
+      },
+      "trainable_parameters": 1773529,
+      "frozen_parameters": 86580480,
+      "losses": [
+        224.5059814453125,
+        203.1532745361328,
+        136.06077575683594
+      ],
+      "gradient_l1": {
+        "cnn": 1024.458236668259,
+        "gev": 11.086389788106317,
+        "gru": 3251.299422264099,
+        "adapter": 0.04255523020401597,
+        "adapter_fusion": 0.07699270853117923,
+        "adapter_refine": 0.02948385068884818,
+        "geometry_fusion": 0.5260376360965893
+      },
+      "optimizer_updates": 3,
+      "step_seconds": [
+        0.8885067701339722,
+        1.097982686944306,
+        1.1341016511432827
+      ],
+      "rgb_prepare_seconds": [
+        0.0126793859526515,
+        0.015123795717954636,
+        0.013926520943641663
+      ],
+      "peak_allocated_mib": 5125.224609375,
+      "validation_frames": [
+        2,
+        37
+      ],
+      "validation_errors": [
+        95.46597625981411,
+        86.6804075162593,
+        77.53438620333668,
+        14.886533260345459,
+        18.467758655548096
+      ],
+      "validation_seconds": 0.7196420938707888,
+      "vit_adapter_shapes": {
+        "rgb": [
+          1,
+          3,
+          518,
+          546
+        ],
+        "tokens": [
+          [
+            1,
+            1443,
+            768
+          ],
+          [
+            1,
+            1443,
+            768
+          ],
+          [
+            1,
+            1443,
+            768
+          ],
+          [
+            1,
+            1443,
+            768
+          ]
+        ],
+        "patch_maps": [
+          [
+            1,
+            768,
+            37,
+            39
+          ],
+          [
+            1,
+            768,
+            37,
+            39
+          ],
+          [
+            1,
+            768,
+            37,
+            39
+          ],
+          [
+            1,
+            768,
+            37,
+            39
+          ]
+        ],
+        "projected": [
+          [
+            1,
+            32,
+            37,
+            39
+          ],
+          [
+            1,
+            32,
+            37,
+            39
+          ],
+          [
+            1,
+            32,
+            37,
+            39
+          ],
+          [
+            1,
+            32,
+            37,
+            39
+          ]
+        ],
+        "patch_fused": [
+          1,
+          32,
+          37,
+          39
+        ],
+        "geometry_context": [
+          1,
+          32,
+          160,
+          240
+        ]
+      },
+      "backbone_sha256": "ba6eeb661731af5886389a5bfb494b69545ea076a9040130728eeeb01b33f8f5",
+      "backbone_unchanged": true,
+      "backbone_gradients_absent": true,
+      "alpha_updates": [
+        {
+          "before": 0.10000000149011612,
+          "gradient": -0.00041174888610839844,
+          "after": 0.10049872100353241
+        },
+        {
+          "before": 0.10049872100353241,
+          "gradient": -0.0003478527069091797,
+          "after": 0.10093030333518982
+        },
+        {
+          "before": 0.10093030333518982,
+          "gradient": -0.0007772445678710938,
+          "after": 0.10136350989341736
+        }
+      ],
+      "fusion_target": "context",
+      "context_and_state_share_enhanced_feature": true,
+      "strict_checkpoint_reload_exact": true,
+      "context_routes": {
+        "rgb_changes_context": true,
+        "rgb_does_not_change_matching_evidence": true,
+        "matching_checks": [
+          "similarity",
+          "gwc",
+          "cnn_guide_0",
+          "cnn_guide_1",
+          "cnn_guide_2",
+          "gev"
+        ],
+        "enhanced_feeds_context_and_state": true,
+        "context_feeds_motion_encoder_and_gru": true,
+        "all_invalid_zero_output": true,
+        "counterfactual_rgb_not_used_for_accuracy": true
+      }
+    },
+    "additional_peak_allocated_mib": 410.72021484375,
+    "initial_similarity_gwc_cnn_guides_gev_exact": true
+  },
+  "small_size": {
+    "disabled_regression": {
+      "seed_initialization_exact": true,
+      "state_dict_keys_exact": true,
+      "strict_legacy_load": true,
+      "cpu_training_outputs_exact": true,
+      "cpu_gradients_exact": true,
+      "gpu_inference_exact": true,
+      "dav2_not_imported": true
+    },
+    "alignment": {
+      "official_rgb_preprocess_exact": true,
+      "prepared_shape": [
+        1,
+        3,
+        518,
+        546
+      ],
+      "original_pixel_ramp_max_error": 0.0001220703125,
+      "wrong_cnn_grid_error": 1.369140625,
+      "patch_size": 14,
+      "blocks": [
+        2,
+        5,
+        8,
+        11
+      ]
+    },
+    "baseline": {
+      "enabled": false,
+      "training_steps": 3,
+      "shapes": {
+        "cnn": [
+          [
+            1,
+            32,
+            384,
+            400
+          ],
+          [
+            1,
+            32,
+            384,
+            400
+          ]
+        ],
+        "similarity_profile": [
+          1,
+          16,
+          8,
+          16
+        ],
+        "guide0": [
+          1,
+          16,
+          4,
+          8
+        ],
+        "guide1": [
+          1,
+          32,
+          4,
+          8
+        ],
+        "guide2": [
+          1,
+          48,
+          4,
+          8
+        ],
+        "gev": [
+          1,
+          1,
+          16,
+          4,
+          8
+        ],
+        "gwc_unet_input": [
+          1,
+          8,
+          16,
+          4,
+          8
+        ],
+        "guide_multiscale": [
+          [
+            1,
+            16,
+            4,
+            8
+          ],
+          [
+            1,
+            32,
+            2,
+            4
+          ],
+          [
+            1,
+            48,
+            1,
+            2
+          ]
+        ],
+        "context_projection": [
+          1,
+          32,
+          8,
+          16
+        ],
+        "hidden_init": [
+          1,
+          64,
+          8,
+          16
+        ],
+        "motion": [
+          1,
+          128,
+          8,
+          16
+        ],
+        "gru": [
+          1,
+          64,
+          8,
+          16
+        ],
+        "gru_input": [
+          1,
+          160,
+          8,
+          16
+        ],
+        "predictions": [
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ]
+        ]
+      },
+      "calls": {
+        "cnn": 3,
+        "similarity_profile": 3,
+        "guide0": 3,
+        "guide1": 3,
+        "guide2": 3,
+        "gev": 3,
+        "context_projection": 3,
+        "hidden_init": 3,
+        "motion": 36,
+        "gru": 36
+      },
+      "first_matching_hashes": {
+        "similarity_profile": "a1abfbcef6924d171596ebeb6d4782a60b0c36cd568ceb9e723a224c6cc56e55",
+        "gwc_unet_input": "ce9843e199990fc24abb185eb20fc616da734bd03b6849054f5120f8ff3d39f9",
+        "cnn_guides": [
+          "aca17286d5323fb15d7ca612cd298e07f4633f205c8f2654723d4a5838491991",
+          "e8a0ffa1a60bbe789516581504c9dd292ca41d635710580d57fd4f54e9a3c988",
+          "401d2c3f8729156f0ca97774aea98f3d51c1b741e7f14df820e60e7a67c39081"
+        ],
+        "gev": "56079ffc603f948ff8855cf633c21b24e11b882c80adcdb1a360a5e712fc3e20"
+      },
+      "routing_hashes": {},
+      "trainable_parameters": 1526152,
+      "frozen_parameters": 0,
+      "losses": [
+        32.613983154296875,
+        39.391441345214844,
+        15.946073532104492
+      ],
+      "gradient_l1": {
+        "cnn": 751.3527527172118,
+        "gev": 42.30892505031079,
+        "gru": 1879.4127169400454
+      },
+      "optimizer_updates": 3,
+      "step_seconds": [
+        1.7619533310644329,
+        0.8617522879503667,
+        0.4768810230307281
+      ],
+      "rgb_prepare_seconds": [
+        4.838826134800911e-05,
+        5.473894998431206e-05,
+        5.262903869152069e-05
+      ],
+      "peak_allocated_mib": 752.9736328125,
+      "validation_frames": [
+        2,
+        37
+      ],
+      "validation_errors": [
+        96.78362573099415,
+        91.52046783625731,
+        82.7485380116959,
+        16.421669960021973,
+        20.062299251556396
+      ],
+      "validation_seconds": 0.5782021260820329
+    },
+    "dav2_geometry": {
+      "enabled": true,
+      "training_steps": 3,
+      "shapes": {
+        "cnn": [
+          [
+            1,
+            32,
+            384,
+            400
+          ],
+          [
+            1,
+            32,
+            384,
+            400
+          ]
+        ],
+        "similarity_profile": [
+          1,
+          16,
+          8,
+          16
+        ],
+        "guide0": [
+          1,
+          16,
+          4,
+          8
+        ],
+        "guide1": [
+          1,
+          32,
+          4,
+          8
+        ],
+        "guide2": [
+          1,
+          48,
+          4,
+          8
+        ],
+        "gev": [
+          1,
+          1,
+          16,
+          4,
+          8
+        ],
+        "gwc_unet_input": [
+          1,
+          8,
+          16,
+          4,
+          8
+        ],
+        "guide_multiscale": [
+          [
+            1,
+            16,
+            4,
+            8
+          ],
+          [
+            1,
+            32,
+            2,
+            4
+          ],
+          [
+            1,
+            48,
+            1,
+            2
+          ]
+        ],
+        "geometry_context": [
+          1,
+          32,
+          8,
+          16
+        ],
+        "enhanced_context": [
+          1,
+          32,
+          8,
+          16
+        ],
+        "context_projection": [
+          1,
+          32,
+          8,
+          16
+        ],
+        "hidden_init": [
+          1,
+          64,
+          8,
+          16
+        ],
+        "motion": [
+          1,
+          128,
+          8,
+          16
+        ],
+        "gru": [
+          1,
+          64,
+          8,
+          16
+        ],
+        "gru_input": [
+          1,
+          160,
+          8,
+          16
+        ],
+        "predictions": [
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ],
+          [
+            1,
+            1,
+            16,
+            32
+          ]
+        ]
+      },
+      "calls": {
+        "cnn": 3,
+        "similarity_profile": 3,
+        "guide0": 3,
+        "guide1": 3,
+        "guide2": 3,
+        "gev": 3,
+        "geometry_context": 3,
+        "enhanced_context": 3,
+        "context_projection": 3,
+        "hidden_init": 3,
+        "motion": 36,
+        "gru": 36
+      },
+      "first_matching_hashes": {
+        "similarity_profile": "a1abfbcef6924d171596ebeb6d4782a60b0c36cd568ceb9e723a224c6cc56e55",
+        "gwc_unet_input": "ce9843e199990fc24abb185eb20fc616da734bd03b6849054f5120f8ff3d39f9",
+        "cnn_guides": [
+          "aca17286d5323fb15d7ca612cd298e07f4633f205c8f2654723d4a5838491991",
+          "e8a0ffa1a60bbe789516581504c9dd292ca41d635710580d57fd4f54e9a3c988",
+          "401d2c3f8729156f0ca97774aea98f3d51c1b741e7f14df820e60e7a67c39081"
+        ],
+        "gev": "56079ffc603f948ff8855cf633c21b24e11b882c80adcdb1a360a5e712fc3e20"
+      },
+      "routing_hashes": {
+        "enhanced_context": "492651709864b15e2d1fe76be54d02ace3af208a084c7a026df84f1ea4852daf",
+        "context_head_input": "492651709864b15e2d1fe76be54d02ace3af208a084c7a026df84f1ea4852daf",
+        "state_head_input": "492651709864b15e2d1fe76be54d02ace3af208a084c7a026df84f1ea4852daf"
+      },
+      "trainable_parameters": 1722249,
+      "frozen_parameters": 86580480,
+      "losses": [
+        32.61384582519531,
+        39.38234329223633,
+        15.930635452270508
+      ],
+      "gradient_l1": {
+        "cnn": 743.295350546483,
+        "gev": 47.1754156149691,
+        "gru": 1885.0449727848172,
+        "adapter": 0.08168766228482127,
+        "adapter_fusion": 0.14975029024935793,
+        "adapter_refine": 0.05566458598332247,
+        "geometry_fusion": 0.30720278175431304
+      },
+      "optimizer_updates": 3,
+      "step_seconds": [
+        0.9793207063339651,
+        1.062928737141192,
+        1.049069871660322
+      ],
+      "rgb_prepare_seconds": [
+        0.014259383082389832,
+        0.01382843591272831,
+        0.012719027232378721
+      ],
+      "peak_allocated_mib": 1283.7998046875,
+      "validation_frames": [
+        2,
+        37
+      ],
+      "validation_errors": [
+        96.78362573099415,
+        91.52046783625731,
+        82.7485380116959,
+        16.422741413116455,
+        20.064663887023926
+      ],
+      "validation_seconds": 0.9504388947971165,
+      "vit_adapter_shapes": {
+        "rgb": [
+          1,
+          3,
+          518,
+          546
+        ],
+        "tokens": [
+          [
+            1,
+            1443,
+            768
+          ],
+          [
+            1,
+            1443,
+            768
+          ],
+          [
+            1,
+            1443,
+            768
+          ],
+          [
+            1,
+            1443,
+            768
+          ]
+        ],
+        "patch_maps": [
+          [
+            1,
+            768,
+            37,
+            39
+          ],
+          [
+            1,
+            768,
+            37,
+            39
+          ],
+          [
+            1,
+            768,
+            37,
+            39
+          ],
+          [
+            1,
+            768,
+            37,
+            39
+          ]
+        ],
+        "projected": [
+          [
+            1,
+            32,
+            37,
+            39
+          ],
+          [
+            1,
+            32,
+            37,
+            39
+          ],
+          [
+            1,
+            32,
+            37,
+            39
+          ],
+          [
+            1,
+            32,
+            37,
+            39
+          ]
+        ],
+        "patch_fused": [
+          1,
+          32,
+          37,
+          39
+        ],
+        "geometry_context": [
+          1,
+          32,
+          8,
+          16
+        ]
+      },
+      "backbone_sha256": "ba6eeb661731af5886389a5bfb494b69545ea076a9040130728eeeb01b33f8f5",
+      "backbone_unchanged": true,
+      "backbone_gradients_absent": true,
+      "alpha_updates": [
+        {
+          "before": 0.10000000149011612,
+          "gradient": -0.00017201900482177734,
+          "after": 0.1004989817738533
+        },
+        {
+          "before": 0.1004989817738533,
+          "gradient": 0.00041365623474121094,
+          "after": 0.1002754494547844
+        },
+        {
+          "before": 0.1002754494547844,
+          "gradient": 0.000576019287109375,
+          "after": 0.09991244226694107
+        }
+      ],
+      "fusion_target": "context",
+      "context_and_state_share_enhanced_feature": true,
+      "strict_checkpoint_reload_exact": true
+    },
+    "additional_peak_allocated_mib": 530.826171875,
+    "initial_similarity_gwc_cnn_guides_gev_exact": true
+  },
+  "actual_train_entry": {
+    "actual_train_entry": true,
+    "global_step": 4,
+    "optimizer_updates": 3,
+    "fusion_target": "context",
+    "validation_errors": [
+      97.84019889922453,
+      93.34469577680277,
+      88.67201615363666,
+      19.837828636169434,
+      23.728352546691895
+    ],
+    "shared_rgb_augmentation": true,
+    "alpha": 0.10006001591682434,
+    "frozen_checkpoint_equals_official_weights": true,
+    "resume": {
+      "global_step": 5,
+      "optimizer_updates": 4,
+      "validation_errors": [
+        97.80584143603232,
+        93.33566489290939,
+        88.59680718329807,
+        19.621292114257812,
+        23.5012264251709
+      ],
+      "alpha": 0.10007927566766739,
+      "strict_weights_optimizer_scheduler_scaler": true
+    }
+  },
+  "actual_checkpoint_compatibility": {
+    "actual_legacy_checkpoint_strict_load": true,
+    "legacy_checkpoint": "/workspace/stereo_fisheye_omni_ds/checkpoints/omnids_fisheye_b6_20261111/omnids_fisheye_b6_20261111_e0.pth",
+    "old_guide_checkpoint_rejected": true
+  },
+  "four_camera_off_regression": {
+    "device": "cpu",
+    "real_sample": false,
+    "input": [
+      [
+        1,
+        1,
+        64,
+        80
+      ],
+      [
+        1,
+        1,
+        64,
+        80
+      ],
+      [
+        1,
+        1,
+        64,
+        80
+      ],
+      [
+        1,
+        1,
+        64,
+        80
+      ]
+    ],
+    "grids": [
+      [
+        16,
+        32,
+        16,
+        2
+      ],
+      [
+        16,
+        32,
+        16,
+        2
+      ],
+      [
+        16,
+        32,
+        16,
+        2
+      ],
+      [
+        16,
+        32,
+        16,
+        2
+      ]
+    ],
+    "shapes": {
+      "cnn": [
+        [
+          1,
+          32,
+          32,
+          40
+        ],
+        [
+          1,
+          32,
+          32,
+          40
+        ],
+        [
+          1,
+          32,
+          32,
+          40
+        ],
+        [
+          1,
+          32,
+          32,
+          40
+        ]
+      ],
+      "profile": [
+        1,
+        16,
+        16,
+        32
+      ],
+      "gev_input": [
+        1,
+        16,
+        16,
+        8,
+        16
+      ],
+      "gev_before_spatial_upsample": [
+        1,
+        1,
+        16,
+        8,
+        16
+      ],
+      "context": [
+        1,
+        32,
+        16,
+        32
+      ],
+      "hidden_init": [
+        1,
+        64,
+        16,
+        32
+      ],
+      "similarity_lookup": [
+        1,
+        36,
+        16,
+        32
+      ],
+      "gev_lookup": [
+        1,
+        18,
+        16,
+        32
+      ],
+      "recurrent_hidden": [
+        1,
+        64,
+        16,
+        32
+      ],
+      "gru_input": [
+        1,
+        160,
+        16,
+        32
+      ],
+      "delta_index": [
+        1,
+        1,
+        16,
+        32
+      ],
+      "up_mask": [
+        1,
+        36,
+        16,
+        32
+      ]
+    },
+    "calls": {
+      "cnn": 1,
+      "profile": 1,
+      "gev_input": 1,
+      "gev_before_spatial_upsample": 1,
+      "context": 3,
+      "hidden_init": 1,
+      "similarity_lookup": 3,
+      "gev_lookup": 3,
+      "recurrent_hidden": 3,
+      "gru_input": 3,
+      "delta_index": 3,
+      "up_mask": 3
+    },
+    "predictions": [
+      [
+        1,
+        1,
+        32,
+        64
+      ],
+      [
+        1,
+        1,
+        32,
+        64
+      ],
+      [
+        1,
+        1,
+        32,
+        64
+      ]
+    ],
+    "loss": 10.251107215881348,
+    "gradient_l1": {
+      "cnn": 260.1291598106927,
+      "context": 1.2802385265749763,
+      "state": 3.0578756851573416,
+      "view_weights": 0.787017937283963,
+      "similarity": 2.044334846053971,
+      "gev": 32.891180709557375,
+      "gru": 1143.3831589892507,
+      "depth_head": 1528.967892408371,
+      "upsample_mask": 15.11149038374424
+    },
+    "optimizer_update": true,
+    "checkpoint_reload": true,
+    "forbidden_imports": [],
+    "num_cams": 4,
+    "iterations": 3,
+    "input_gradient_l1": [],
+    "mask_checks": {},
+    "index_ranges": [
+      [
+        8.0,
+        8.0
+      ],
+      [
+        7.778120517730713,
+        8.252959251403809
+      ],
+      [
+        7.61918306350708,
+        8.358695983886719
+      ]
+    ],
+    "use_group_variance": true,
+    "use_dynamic_context": true,
+    "context_constant": false,
+    "hidden_updated": true,
+    "lookup_indices_updated": true,
+    "training_seconds": 0.34322720393538475,
+    "peak_allocated_mib": null
+  },
+  "scope": "Smoke tests only. No accuracy improvement established; previous GEV Guide results are not reused."
+}
