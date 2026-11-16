@@ -46,8 +46,10 @@ class GeometryAwareFeatureFusion(nn.Module):
         quality = sampling_quality.float().masked_fill(~cross_valid, 0.).clamp(0., 1.)
         features = torch.cat([clean_self, clean_cross, consistency, difference,
                               self_valid.float(), cross_valid.float(), quality], dim=1)
-        logits = self.network(features)
         with torch.autocast(device_type=self_cost.device.type, enabled=False):
+            # 一致性是GWC的乘积，可能超过FP16的65504上限；不仅乘积，
+            # 权重预测也保持FP32，否则Conv的autocast会把有限特征转成Inf。
+            logits = self.network(features)
             # Q=0仍是低质量有效样本，不改变几何Mask；只有跨路有效时仍必须取跨路。
             cross_logit = logits[:, 1:2].float() + torch.log(quality + 1e-6)
             logits = torch.cat([logits[:, :1].float(), cross_logit], dim=1)

@@ -93,51 +93,6 @@
       "reason": "User requires all trainable stereo/adapter/fusion parameters to train from scratch; no e27 initialization"
     }
   },
-  "selected_run": {
-    "epochs": 30,
-    "batch_size": 2,
-    "gpu": 0,
-    "mixed_precision": true,
-    "gradient_checkpointing": true,
-    "gpu_memory_fraction": 0.55,
-    "num_workers": 4,
-    "container": "stereo-fisheye-omni-ds-dev",
-    "code_directory": "/root/lzx_ws/project/stereo_fisheye_omni_ds_yinyang_20261117",
-    "name": "omnids_dav2_yinyang_scratch30_20261117",
-    "initialization": "All trainable parameters from their own initialization; official pretrained Frozen DA-V2 ViT retained; no stereo checkpoint loaded",
-    "pretrain_ckpt": null,
-    "restore_ckpt": null,
-    "real_training_start": {
-      "status": "RUNNING",
-      "started_at": "2026-11-17T01:20:03+08:00",
-      "verified_at": "2026-11-16T17:22:44.841030+00:00",
-      "tmux_session": "yinyang-dav2-scratch30",
-      "pid": 56222,
-      "epoch": 1,
-      "steps_per_epoch": 4352,
-      "pretrain_ckpt": null,
-      "restore_ckpt": null,
-      "optimizer_started_at_zero": true,
-      "old_process_stopped": true,
-      "initial_loss": 126.78194427490234,
-      "last_step": {
-        "epoch": "1",
-        "step": "41",
-        "loss": "159.844482421875",
-        "mean_loss": "138.48651123046875",
-        "lr": "3.5073529411764706e-05",
-        "optimizer_updates": "41",
-        "amp_scale": "128.0",
-        "batch_size": "2",
-        "step_seconds": "0.9923911094665527",
-        "valid_ratio": "0.3153710961341858",
-        "final_index_mae": "22.254365921020508",
-        "peak_allocated_mib": "17376.845703125",
-        "peak_reserved_mib": "17578.0"
-      },
-      "official_frozen_dav2_retained": true
-    }
-  },
   "historical_warm_start_validation": {
     "profiles": [
       {
@@ -220,5 +175,98 @@
     },
     "metric_caveat": "Only two validation frames; tests establish trainability, not improved accuracy",
     "historical_smoke_initialization": "Existing real-GT profiles/resume/optimizer-moment tests above used e27 warm-start; retained as historical evidence, not scratch accuracy"
-  }
+  },
+  "failed_scratch_fp16_run": {
+    "epochs": 30,
+    "batch_size": 2,
+    "gpu": 0,
+    "mixed_precision": true,
+    "gradient_checkpointing": true,
+    "gpu_memory_fraction": 0.55,
+    "num_workers": 4,
+    "container": "stereo-fisheye-omni-ds-dev",
+    "code_directory": "/root/lzx_ws/project/stereo_fisheye_omni_ds_yinyang_20261117",
+    "name": "omnids_dav2_yinyang_scratch30_20261117",
+    "initialization": "All trainable parameters from their own initialization; official pretrained Frozen DA-V2 ViT retained; no stereo checkpoint loaded",
+    "pretrain_ckpt": null,
+    "restore_ckpt": null,
+    "real_training_start": {
+      "status": "FAILED_FP16_OVERFLOW_AFTER_STEP_41",
+      "started_at": "2026-11-17T01:20:03+08:00",
+      "verified_at": "2026-11-16T17:22:44.841030+00:00",
+      "tmux_session": "yinyang-dav2-scratch30",
+      "pid": 56222,
+      "epoch": 1,
+      "steps_per_epoch": 4352,
+      "pretrain_ckpt": null,
+      "restore_ckpt": null,
+      "optimizer_started_at_zero": true,
+      "old_process_stopped": true,
+      "initial_loss": 126.78194427490234,
+      "last_step": {
+        "epoch": "1",
+        "step": "41",
+        "loss": "159.844482421875",
+        "mean_loss": "138.48651123046875",
+        "lr": "3.5073529411764706e-05",
+        "optimizer_updates": "41",
+        "amp_scale": "128.0",
+        "batch_size": "2",
+        "step_seconds": "0.9923911094665527",
+        "valid_ratio": "0.3153710961341858",
+        "final_index_mae": "22.254365921020508",
+        "peak_allocated_mib": "17376.845703125",
+        "peak_reserved_mib": "17578.0"
+      },
+      "official_frozen_dav2_retained": true
+    }
+  },
+  "amp_fusion_overflow_fix": {
+    "root_cause": "Autocast cast finite FP32 consistency features to FP16 before weight Conv3d",
+    "first_nonfinite_module": "fusion.network.0",
+    "finite_input_absmax": 80437.921875,
+    "fp16_max": 65504.0,
+    "reproduction_before_fix": {
+      "gwc": 512,
+      "consistency": 262144,
+      "inputs_finite": true,
+      "weights_finite": false,
+      "output_finite": false
+    },
+    "fix": "Keep existing two weight-prediction Conv3d layers in FP32; no formula, parameters, masks or clipping changes",
+    "gpu_regression": "PASS: high-dynamic-range AMP forward/backward and existing mask/quality/gradient tests",
+    "cpu_regression": "PASS",
+    "da_yinyang_regression": "PASS: CPU FP32/BF16 synthetic frozen-ViT pipeline"
+  },
+  "selected_run": {
+    "name": "omnids_dav2_yinyang_scratch30_bs2_20261117",
+    "epochs": 30,
+    "batch_size": 2,
+    "gpu": 0,
+    "mixed_precision": true,
+    "gradient_checkpointing": true,
+    "gpu_memory_fraction": 0.9,
+    "num_workers": 4,
+    "initialization": "All trainable parameters use their own initialization; only Frozen DA-V2 ViT loads official pretrained weights",
+    "pretrain_ckpt": null,
+    "restore_ckpt": null,
+    "container": "stereo-fisheye-omni-ds-dev",
+    "code_directory": "/root/lzx_ws/project/stereo_fisheye_omni_ds_yinyang_20261117",
+    "real_training_start": {
+      "status": "RUNNING",
+      "started_at": "2026-11-17T01:32:56+08:00",
+      "verified_at": "2026-11-16T17:33:59.384775+00:00",
+      "pid": 58998,
+      "tmux_session": "yinyang-dav2-scratch30",
+      "epoch": 1,
+      "batch_size": 2,
+      "total_epochs": 30,
+      "pretrain_ckpt": null,
+      "restore_ckpt": null,
+      "steps_per_epoch": 4352,
+      "last_step": null,
+      "phase": "first batch warmup"
+    }
+  },
+  "batch3_test": "Stopped after one successful real-GT optimizer update at user request; batch size fixed to 2 for formal training"
 }

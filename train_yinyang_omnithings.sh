@@ -23,5 +23,5 @@ exec "${PYTHON_BIN:-/opt/pdf-omni-venv/bin/python}" -u train.py \
   --total_epochs 30 --train_iters 12 --batch_size "${BATCH_SIZE:-2}" --num_workers 4 \
   --lr 0.0005 --wdecay 0.00001 --mixed_precision --amp_init_scale 128 \
   --gradient_checkpointing --val_count 512 --seed 0 \
-  --name "${RUN_NAME:-omnids_dav2_yinyang_scratch30_20261117}" \
+  --name "${RUN_NAME:-omnids_dav2_yinyang_scratch30_bs2_20261117}" \
   "$@"

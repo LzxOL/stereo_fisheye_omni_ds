@@ -121,6 +121,21 @@ def main():
     assert torch.isfinite(empty.grad).all() and not empty.grad.any()
     assert torch.isfinite(other.grad).all() and not other.grad.any()
     assert all(p.grad is not None and torch.isfinite(p.grad).all() and not p.grad.any() for p in model.parameters())
+    # 从头训练可能产生较大的有限GWC；乘积超过65504时，FP16 Conv会溢出。
+    # 回归测试使用真实高动态范围输入，不以nan_to_num或裁剪掩盖问题。
+    strong_model=GeometryAwareFeatureFusion().to(device)
+    dtype=torch.float16 if device.type=='cuda' else torch.bfloat16
+    own=torch.full((1,8,4,8,8),512.,device=device,dtype=dtype,requires_grad=True)
+    cross=torch.full_like(own,384.,requires_grad=True)
+    support=torch.ones(1,1,4,8,8,dtype=torch.bool,device=device)
+    with torch.autocast(device.type,dtype=dtype):
+        value,valid,weights=strong_model(own,cross,support,support,support.float()*.8)
+    assert torch.isfinite(value).all() and torch.isfinite(weights).all()
+    expected=(512*2+384*.8)/(2+.8)
+    torch.testing.assert_close(value.float(),torch.full_like(value.float(),expected),rtol=0,atol=2.)
+    value.float().mean().backward()
+    assert all(torch.isfinite(p.grad).all() for p in strong_model.parameters())
+    assert torch.isfinite(own.grad).all() and torch.isfinite(cross.grad).all()
     print(json.dumps(dict(status='PASS',device=str(device),
         output_shapes={key:list(v.shape) for key,v in outputs.items()},shared_network_calls=len(calls),
         four_mask_cases=True,weights_sum_to_one_when_valid=True,all_invalid_safe=True,
@@ -128,6 +143,7 @@ def main():
         cross_weight_high_low_quality_at_init=initial_quality,
         cross_weight_high_low_quality_after_update=learned_quality,
         all_parameters_and_costs_receive_finite_gradients=True,
+        high_dynamic_range_amp_forward_backward=True,
         trainable_parameters=sum(p.numel() for p in model.parameters())),indent=2))
 
 
