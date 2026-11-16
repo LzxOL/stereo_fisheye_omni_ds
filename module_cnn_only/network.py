@@ -661,6 +661,7 @@ class OmniDS(nn.Module):
         self.enhancer = GeometryAwareFeatureEnhancer(self.opts.base_channel, depth_chunk=self.depth_chunk)
         self.warp = BidirectionalCrossGridWarp(grid_package, self.depth_chunk)
         self.fusion = GeometryAwareFeatureFusion(self.gev_module.num_groups)
+        self.fusion.use_checkpoint = self.opts.gradient_checkpointing
         if self.opts.get('training_geometry', False):
             from module_cnn_only.yinyang_training import YinYangTrainingGeometry
             self.training_geometry = YinYangTrainingGeometry(grid_package, 2**self.opts.num_downsample)

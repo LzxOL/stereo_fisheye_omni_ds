@@ -136,6 +136,24 @@ def main():
     value.float().mean().backward()
     assert all(torch.isfinite(p.grad).all() for p in strong_model.parameters())
     assert torch.isfinite(own.grad).all() and torch.isfinite(cross.grad).all()
+    # checkpoint不改变两方向输出或梯度；使用非零末层权重检查完整融合网络。
+    with torch.no_grad():
+        model.network[-1].weight.normal_(std=.01)
+    variables=(yin['own'],yang['own'],yin['cross'],yang['cross'],*model.parameters())
+    def paired():
+        return model.forward_bidirectional(yin['own'],yang['own'],yin['ms'],yang['ms'],
+                                          warped,yin['quality'],yang['quality'])
+    plain=paired()
+    loss=plain['fused_yin'].square().mean()+plain['fused_yang'].square().mean()
+    gradients=torch.autograd.grad(loss,variables)
+    model.use_checkpoint=True
+    recomputed=paired()
+    loss=recomputed['fused_yin'].square().mean()+recomputed['fused_yang'].square().mean()
+    gradients_cp=torch.autograd.grad(loss,variables)
+    for key in plain:
+        torch.testing.assert_close(plain[key],recomputed[key],rtol=0,atol=0)
+    for a,b in zip(gradients,gradients_cp):
+        torch.testing.assert_close(a,b,rtol=0,atol=0)
     print(json.dumps(dict(status='PASS',device=str(device),
         output_shapes={key:list(v.shape) for key,v in outputs.items()},shared_network_calls=len(calls),
         four_mask_cases=True,weights_sum_to_one_when_valid=True,all_invalid_safe=True,
@@ -144,6 +162,7 @@ def main():
         cross_weight_high_low_quality_after_update=learned_quality,
         all_parameters_and_costs_receive_finite_gradients=True,
         high_dynamic_range_amp_forward_backward=True,
+        checkpoint_outputs_and_gradients_identical=True,
         trainable_parameters=sum(p.numel() for p in model.parameters())),indent=2))
 
 

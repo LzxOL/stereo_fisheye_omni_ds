@@ -45,7 +45,7 @@ Motion为128，GRU输入为160；沿用已训练DA-V2 Baseline配置。
 固定网格以非持久buffer随模型移动到GPU，不在每批重新传输，也不写入每个大checkpoint；
 checkpoint另存完整几何元数据和标定/配置哈希，恢复时重新校验外部几何缓存。
 
-`--gradient_checkpointing` 对局部增强和无状态的MotionEncoder/ConvGRU/DepthHead卷积重计算，
+`--gradient_checkpointing` 对局部增强、点式代价融合和无状态的MotionEncoder/ConvGRU/DepthHead卷积重计算，
 不重做扫描、Lookup或修改U-Net BatchNorm统计。小尺寸测试验证输出及全部输入/卷积参数梯度逐值一致。
 关闭开关不增加任何参数、不改变checkpoint键。
 
@@ -59,18 +59,18 @@ checkpoint另存完整几何元数据和标定/配置哈希，恢复时重新校
 在服务器容器 `stereo-fisheye-omni-ds-dev` 的代码目录执行：
 
 ```bash
-GPU_ID=0 BATCH_SIZE=2 bash train_yinyang_omnithings.sh --gpu_memory_fraction 0.90
+GPU_ID=0 BATCH_SIZE=4 bash train_yinyang_omnithings.sh --gpu_memory_fraction 0.96
 ```
 
-默认实验名 `omnids_dav2_yinyang_scratch30_bs2_20261117`。不加载旧双目实验的
+默认实验名 `omnids_dav2_yinyang_scratch30_bs4_20261117`。不加载旧双目实验的
 `e27.pth`，也不传 `--pretrain_ckpt` 或 `--restore_ckpt`；CNN、Adapter、Context Fusion、
 几何增强、代价融合、GEV和GRU等全部可训练模块使用自身初始化，从epoch 1开始训练30轮。
 Frozen DA-V2 Backbone仍使用官方预训练权重并保持冻结。
 Optimizer、scheduler、AMP scaler及更新计数均从头建立，不覆盖已停止的旧初始化实验。
 
 ```bash
-GPU_ID=0 BATCH_SIZE=2 RESTORE_CKPT=/绝对路径/当前实验_eN.pth \
-  bash train_yinyang_omnithings.sh --gpu_memory_fraction 0.90
+GPU_ID=0 BATCH_SIZE=4 RESTORE_CKPT=/绝对路径/当前实验_eN.pth \
+  bash train_yinyang_omnithings.sh --gpu_memory_fraction 0.96
 ```
 
 恢复会严格加载模型、optimizer、scheduler、scaler和更新计数，并检查几何一致性。
@@ -79,15 +79,17 @@ GPU_ID=0 BATCH_SIZE=2 RESTORE_CKPT=/绝对路径/当前实验_eN.pth \
 
 默认训练8704帧、验证512帧，官方1024张测试集保留；30轮和LR等参数均可通过末尾CLI覆盖。
 `--gpu_memory_fraction` 是共享GPU上的分配预算，不是占用虚拟空闲显存。
-正式实验按用户指定保持batch size 2。GPU 0其他任务结束后，分配预算调整为90%；
-原55%预算下的批大小测试属于历史配置。
+GPU 0空闲后实际测试batch size 6，前向阶段OOM；batch size 4原配置也在约30 GiB处OOM。
+因此将已有重计算开关扩展至没有BN/随机操作的点式代价融合，避免保留35通道拼接体。
+新增测试逐值比较启用前后的双向输出和全部输入/参数梯度，不增加参数或改变公式。
+正式实验采用batch size 4，分配预算96%；原55%预算和batch size 2的记录属于历史配置。
 
 ## 检查与监控
 
 ```bash
 python tools/smoke_yinyang_training.py
 python tools/smoke_dav2_yinyang.py --device cpu
-tail -f checkpoints/omnids_dav2_yinyang_scratch30_bs2_20261117/steps.csv
+tail -f checkpoints/omnids_dav2_yinyang_scratch30_bs4_20261117/steps.csv
 ```
 
 每步CSV包含Loss、索引MAE、有效监督比例、优化器更新次数、AMP scale、耗时及峰值显存。

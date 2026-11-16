@@ -238,7 +238,8 @@
     "cpu_regression": "PASS",
     "da_yinyang_regression": "PASS: CPU FP32/BF16 synthetic frozen-ViT pipeline"
   },
-  "selected_run": {
+  "batch3_test": "Stopped after one successful real-GT optimizer update at user request; batch size fixed to 2 for formal training",
+  "previous_batch2_run": {
     "name": "omnids_dav2_yinyang_scratch30_bs2_20261117",
     "epochs": 30,
     "batch_size": 2,
@@ -253,7 +254,7 @@
     "container": "stereo-fisheye-omni-ds-dev",
     "code_directory": "/root/lzx_ws/project/stereo_fisheye_omni_ds_yinyang_20261117",
     "real_training_start": {
-      "status": "RUNNING",
+      "status": "STOPPED_FOR_USER_BATCH_SIZE_6_THEN_4_TEST",
       "started_at": "2026-11-17T01:32:56+08:00",
       "verified_at": "2026-11-16T17:33:59.384775+00:00",
       "pid": 58998,
@@ -268,5 +269,175 @@
       "phase": "first batch warmup"
     }
   },
-  "batch3_test": "Stopped after one successful real-GT optimizer update at user request; batch size fixed to 2 for formal training"
+  "batch6_then4_trials": {
+    "batch6": {
+      "status": "OOM during forward",
+      "exclusive_gpu": true,
+      "allocator_budget_fraction": 0.93,
+      "error": "CUDA out of memory. Tried to allocate 1.01 GiB. GPU 0 has a total capacity of 31.36 GiB of which 2.23 GiB is free. Including non-PyTorch memory, this process has 29.10 GiB memory in use. 29.16 GiB allowed; Of the allocated memory 28.03 GiB is allocated by PyTorch, and 498.84 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    "batch4_before_checkpoint": {
+      "status": "OOM during forward",
+      "allocator_budget_fraction": 0.96,
+      "error": "CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 31.36 GiB of which 653.88 MiB is free. Including non-PyTorch memory, this process has 30.70 GiB memory in use. 30.10 GiB allowed; Of the allocated memory 30.00 GiB is allocated by PyTorch, and 100.91 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)"
+    },
+    "fusion_checkpoint_cpu_test": {
+      "status": "PASS",
+      "device": "cpu",
+      "output_shapes": {
+        "fused_yin": [
+          2,
+          8,
+          5,
+          7,
+          11
+        ],
+        "fused_yang": [
+          2,
+          8,
+          5,
+          5,
+          9
+        ],
+        "yin_valid": [
+          2,
+          1,
+          5,
+          7,
+          11
+        ],
+        "yang_valid": [
+          2,
+          1,
+          5,
+          5,
+          9
+        ],
+        "yin_weights": [
+          2,
+          2,
+          5,
+          7,
+          11
+        ],
+        "yang_weights": [
+          2,
+          2,
+          5,
+          5,
+          9
+        ]
+      },
+      "shared_network_calls": 2,
+      "four_mask_cases": true,
+      "weights_sum_to_one_when_valid": true,
+      "all_invalid_safe": true,
+      "consistency_difference_both_valid_only": true,
+      "initial_self_preference": true,
+      "cross_weight_high_low_quality_at_init": [
+        [
+          0.3103450834751129,
+          0.047619495540857315
+        ],
+        [
+          0.3103451132774353,
+          0.047619499266147614
+        ]
+      ],
+      "cross_weight_high_low_quality_after_update": [
+        [
+          0.3117137849330902,
+          0.047902002930641174
+        ],
+        [
+          0.3117096424102783,
+          0.04790106415748596
+        ]
+      ],
+      "all_parameters_and_costs_receive_finite_gradients": true,
+      "high_dynamic_range_amp_forward_backward": true,
+      "checkpoint_outputs_and_gradients_identical": true,
+      "trainable_parameters": 610
+    },
+    "full_training_adapter_cpu_test": {
+      "status": "PASS",
+      "predictions": [
+        [
+          1,
+          1,
+          8,
+          16
+        ],
+        [
+          1,
+          1,
+          8,
+          16
+        ],
+        [
+          1,
+          1,
+          8,
+          16
+        ]
+      ],
+      "loss": 5.649608612060547,
+      "valid_fraction": 0.7109375,
+      "constant_index_preserved": true,
+      "no_half_pixel_shift": true,
+      "empty_mask_zero": true,
+      "gradient_to_both_images": true,
+      "checkpoint_equivalence": true,
+      "gru_checkpoint_output_and_gradient_equivalence": true,
+      "strict_reload": true
+    },
+    "note": "Only activation retention changes; same two pointwise weight layers/forward formula/parameters; no BN or random operations in fused checkpoint"
+  },
+  "selected_run": {
+    "name": "omnids_dav2_yinyang_scratch30_bs4_20261117",
+    "epochs": 30,
+    "batch_size": 4,
+    "gpu": 0,
+    "mixed_precision": true,
+    "gradient_checkpointing": true,
+    "checkpoint_scopes": [
+      "local_feature_refiner",
+      "pointwise_cost_fusion",
+      "stateless_gru_update"
+    ],
+    "gpu_memory_fraction": 0.96,
+    "num_workers": 4,
+    "initialization": "All trainable modules from initialization; Frozen DA-V2 loads official pretrained weights only",
+    "pretrain_ckpt": null,
+    "restore_ckpt": null,
+    "container": "stereo-fisheye-omni-ds-dev",
+    "code_directory": "/root/lzx_ws/project/stereo_fisheye_omni_ds_yinyang_20261117",
+    "real_training_start": {
+      "status": "RUNNING",
+      "started_at": "2026-11-17T01:45:08+08:00",
+      "verified_at": "2026-11-16T17:47:35.668897+00:00",
+      "pid": 67623,
+      "tmux_session": "yinyang-dav2-scratch30",
+      "epoch": 1,
+      "steps_per_epoch": 2176,
+      "last_step": {
+        "epoch": "1",
+        "step": "35",
+        "loss": "102.20497131347656",
+        "mean_loss": "135.76864624023438",
+        "lr": "4.573529411764706e-05",
+        "optimizer_updates": "35",
+        "amp_scale": "128.0",
+        "batch_size": "4",
+        "step_seconds": "1.782156229019165",
+        "valid_ratio": "0.3176741600036621",
+        "final_index_mae": "13.125782012939453",
+        "peak_allocated_mib": "30519.5732421875",
+        "peak_reserved_mib": "30828.0"
+      },
+      "pretrain_ckpt": null,
+      "restore_ckpt": null,
+      "optimizer_started_at_zero": true
+    }
+  }
 }

@@ -20,8 +20,8 @@ exec "${PYTHON_BIN:-/opt/pdf-omni-venv/bin/python}" -u train.py \
   --dav2_checkpoint /cache/models/depth_anything_v2_vitb.pth \
   --db_root "${DB_ROOT:-/root/lzx_ws/datasets/Omnidirectional_Stereo_Dataset}" --dbname omnithings \
   --sweep_size 160 240 --num_invdepth 96 --num_depth_samples 96 \
-  --total_epochs 30 --train_iters 12 --batch_size "${BATCH_SIZE:-2}" --num_workers 4 \
+  --total_epochs 30 --train_iters 12 --batch_size "${BATCH_SIZE:-4}" --num_workers 4 \
   --lr 0.0005 --wdecay 0.00001 --mixed_precision --amp_init_scale 128 \
   --gradient_checkpointing --val_count 512 --seed 0 \
-  --name "${RUN_NAME:-omnids_dav2_yinyang_scratch30_bs2_20261117}" \
+  --name "${RUN_NAME:-omnids_dav2_yinyang_scratch30_bs4_20261117}" \
   "$@"

@@ -22,6 +22,7 @@ class GeometryAwareFeatureFusion(nn.Module):
     """
     def __init__(self, groups=8):
         super().__init__()
+        self.use_checkpoint = False
         self.network = nn.Sequential(
             nn.Conv3d(4 * groups + 3, 16, 1),
             nn.ReLU(),
@@ -69,9 +70,15 @@ class GeometryAwareFeatureFusion(nn.Module):
         两个quality都须在各自目标网格上，Shape分别[B,1,D,Hy,Wy]/[B,1,D,Ha,Wa]。
         两次调用共享self.network。最终dict保留两路代价、有效性及权重。
         """
-        yin, ym, yw = self(yin_cost, warped['yang_to_yin'], yin_valid,
+        apply_fusion = self
+        if self.use_checkpoint and self.training:
+            from functools import partial
+            from torch.utils.checkpoint import checkpoint
+            # 点式融合没有BN/随机操作；反向重算，免于保存巨大的35通道拼接体。
+            apply_fusion = partial(checkpoint, self, use_reentrant=False)
+        yin, ym, yw = apply_fusion(yin_cost, warped['yang_to_yin'], yin_valid,
                            warped['yang_to_yin_valid'], yang_to_yin_quality)
-        yang, am, aw = self(yang_cost, warped['yin_to_yang'], yang_valid,
+        yang, am, aw = apply_fusion(yang_cost, warped['yin_to_yang'], yang_valid,
                             warped['yin_to_yang_valid'], yin_to_yang_quality)
         return dict(fused_yin=yin, fused_yang=yang, yin_valid=ym, yang_valid=am,
                     yin_weights=yw, yang_weights=aw)
