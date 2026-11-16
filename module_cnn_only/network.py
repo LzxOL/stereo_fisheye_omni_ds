@@ -580,8 +580,6 @@ class OmniDS(nn.Module):
         if self.opts.use_yinyang:
             self._init_yinyang(grid_package)
             return
-        if grid_package is not None:
-            raise ValueError('grid_package requires use_yinyang=True')
 
         # Compute downsampled ERP size
         factor = 2 ** self.opts.num_downsample
@@ -730,19 +728,13 @@ class OmniDS(nn.Module):
             raise ValueError('Yin-Yang V1 uses the stride-2 CNN, static context and GWC only; no DA-V2')
         refinement_options = dict(self.opts.get('yinyang_refinement', {}))
         refinement_options.setdefault('context_channels', self.opts.base_channel)
-        if refinement_options['context_channels'] != self.opts.base_channel:
-            raise ValueError('Yin-Yang context_channels must match base_channel')
-        if refinement_options.get('num_depth', self.opts.num_invdepth) != self.opts.num_invdepth:
-            raise ValueError('Yin-Yang num_depth must match num_invdepth')
         depth_chunk = self.opts.get('depth_chunk', 8)
         self.grid_package = grid_package
         axis = torch.tensor(grid_package.metadata['inverse_depth_candidates'], dtype=torch.float32)
-        if len(axis) < 2 or not torch.isfinite(axis).all() or not (axis > 0).all() or not (axis.diff() > 0).all():
-            raise ValueError('Use the actual positive increasing radial inverse-depth candidate axis')
         # 不重建EPS→rho_max轴：原192[::2]的96候选以几何包实际数值为准。
         self.register_buffer('inverse_depth_candidates', axis)
         num_depth = refinement_options.pop('num_depth', self.opts.num_invdepth)
-        if num_depth != len(axis):
+        if num_depth != self.opts.num_invdepth or num_depth != len(axis):
             raise ValueError('Network and grid package must use exactly the same candidate axis')
         self.groups = refinement_options.get('gwc_groups', 8)
         self.channels = refinement_options.get('context_channels', 32)
@@ -777,8 +769,6 @@ class OmniDS(nn.Module):
         from experiments.local_spherical_grid.adaptive_local_grid_v1 import sweep_patch, sample_reference
         from module_cnn_only.similarity_context import groupwise_correlation_volume
 
-        if len(imgs) != 2:
-            raise ValueError('imgs must be [left_fisheye, right_fisheye]')
         features = self.encoder(imgs)  # 原共享CNN，每Forward一次。
         costs, masks, contexts, context_valid = {}, {}, {}, {}
         for name in ('yin', 'yang'):
@@ -991,8 +981,6 @@ class OmniDS(nn.Module):
             if test_mode:
                 return {name: row['final_depth_idx'] for name, row in result.items()}
             return result
-        if grids is None:
-            raise ValueError('Legacy OmniDS requires grids')
         if len(imgs) != self.opts.num_cams or len(grids) != self.opts.num_cams or iters < 1:
             raise ValueError('Expected num_cams images/grids and at least one iteration')
         if self.opts.num_cams == 2:

@@ -31,8 +31,6 @@ class DepthPyramid(nn.Module):
     """
     def __init__(self, num_levels=2):
         super().__init__()
-        if num_levels < 1:
-            raise ValueError('num_levels must be positive')
         self.num_levels = num_levels
 
     def forward(self, volume, valid):
@@ -58,8 +56,6 @@ class DepthWiseLookup(nn.Module):
     """
     def __init__(self, radius=4):
         super().__init__()
-        if radius < 0:
-            raise ValueError('radius must be nonnegative')
         self.radius = radius
 
     def forward(self, volumes, masks, current_depth_idx):
@@ -167,16 +163,10 @@ class StereoDepthRefinement(nn.Module):
                                              gru_hidden_dim, motion_feature_dim)
 
     def forward(self, fused_gwc, reference_context, candidate_valid, reference_valid, iters=None):
-        batch, _, depth, height, width = fused_gwc.shape
-        if depth != self.num_depth or height % 4 or width % 4:
-            raise ValueError('Use the configured D and H/W divisible by four; never resize charts')
-        if candidate_valid.dtype != torch.bool or candidate_valid.shape != (batch, 1, depth, height, width):
-            raise ValueError('candidate_valid must be bool [B,1,D,H,W]')
-        if reference_context.shape[-2:] != (height, width) or reference_valid.shape != (batch, 1, height, width):
-            raise ValueError('Context and its left-only validity must already be on the target grid')
+        depth = fused_gwc.shape[2]
+        if depth != self.num_depth:
+            raise ValueError('Volume D must match the configured candidate axis')
         iterations = self.gru_iters if iters is None else iters
-        if iterations < 1:
-            raise ValueError('iters must be positive')
         valid = candidate_valid & reference_valid.unsqueeze(2)
         pixels = valid.any(dim=2)
         aggregated = self.aggregation(fused_gwc.masked_fill(~valid, 0.)).masked_fill(~valid, 0.)

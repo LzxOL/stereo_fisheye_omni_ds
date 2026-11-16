@@ -61,8 +61,6 @@ class BidirectionalCrossGridWarp(nn.Module):
     """
     def __init__(self, package, depth_chunk=8):
         super().__init__()
-        if depth_chunk < 1:
-            raise ValueError('depth_chunk must be positive')
         self.depth_chunk = depth_chunk
         self.num_depth = len(package.metadata['inverse_depth_candidates'])
         self.yin_shape, self.yang_shape = tuple(package.yin.shape), tuple(package.yang.shape)
@@ -80,14 +78,9 @@ class BidirectionalCrossGridWarp(nn.Module):
             self.register_buffer(target + '_padding', padding)
 
     def forward(self, yin_cost, yang_cost, yin_stereo_valid, yang_stereo_valid):
-        batch, groups, depth, hy, wy = yin_cost.shape
+        batch, groups, depth = yin_cost.shape[:3]
         if yang_cost.shape[:3] != (batch, groups, depth) or depth != self.num_depth:
             raise ValueError('Both costs must share B/G/D and the geometry package candidate axis')
-        if (hy, wy) != self.yin_shape or tuple(yang_cost.shape[-2:]) != self.yang_shape:
-            raise ValueError('Costs must use the native padded H/W of their geometry package')
-        for cost, mask in [(yin_cost, yin_stereo_valid), (yang_cost, yang_stereo_valid)]:
-            if mask.dtype != torch.bool or mask.shape != (batch, 1, depth, *cost.shape[-2:]):
-                raise ValueError('Each stereo_valid must be bool [B,1,D,H,W] on its source grid')
         # 源Padding也明确剔除，避免调用方误把Padding的Mask设成True。
         yin_support = yin_stereo_valid & self.yin_padding[None, None, None]
         yang_support = yang_stereo_valid & self.yang_padding[None, None, None]

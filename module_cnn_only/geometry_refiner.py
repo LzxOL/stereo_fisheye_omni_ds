@@ -50,8 +50,6 @@ class LocalFeatureRefiner(nn.Module):
     """
     def __init__(self, channels=32, geometry_channels=16, depth_chunk=8):
         super().__init__()
-        if depth_chunk < 1:
-            raise ValueError('depth_chunk must be positive')
         self.depth_chunk = depth_chunk
         self.fusion = nn.Conv2d(channels + geometry_channels + 1, channels, 1)
         self.relu = nn.ReLU()

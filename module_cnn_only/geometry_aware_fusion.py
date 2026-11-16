@@ -33,13 +33,6 @@ class GeometryAwareFeatureFusion(nn.Module):
             self.network[-1].bias.copy_(torch.tensor([math.log(2.), 0.]))
 
     def forward(self, self_cost, cross_cost, self_valid, cross_valid, sampling_quality):
-        mask_shape = (self_cost.shape[0], 1, *self_cost.shape[2:])
-        if self_cost.shape != cross_cost.shape:
-            raise ValueError('Costs must already be aligned to the same target [B,G,D,H,W]')
-        if any(m.shape != mask_shape or m.dtype != torch.bool for m in (self_valid, cross_valid)):
-            raise ValueError('Validity masks must be bool [B,1,D,H,W]')
-        if sampling_quality.shape != mask_shape:
-            raise ValueError('Explicit continuous sampling_quality must be [B,1,D,H,W]')
         if not sampling_quality.is_floating_point():
             raise ValueError('Sampling quality is a floating confidence, not a binary mask')
         both = self_valid & cross_valid
