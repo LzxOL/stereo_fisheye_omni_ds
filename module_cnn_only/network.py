@@ -420,6 +420,7 @@ class MotionEncoder(nn.Module):
         self.conv_out = nn.Conv2d(64 + 64 + 64 + 32, hidden_channels - 1, 3, padding=1)
 
     def forward(self, sim_context, dino_feat, gev_feat, depth):
+        # 原单网格路径：把匹配查询、CNN Context 和当前索引编码成128通道运动特征。
         sim = F.relu(self.conv_sim1(sim_context))
         sim = F.relu(self.conv_sim2(sim))
 
@@ -469,6 +470,7 @@ class UpdateBlock(nn.Module):
 
     def forward(self, net, similarity_profile, dino_feat, gev_feat, inv_depth,
                 no_upsample=False):
+        # 执行一轮原单网格更新：查询匹配特征、更新Hidden，返回索引增量和上采样权重。
         """
         Args:
             net: [B, hidden_dim, H, W] - hidden state
@@ -519,6 +521,7 @@ class OmniDS(nn.Module):
     """
 
     def __init__(self, varargin=None, grid_package=None):
+        # 构造网络：创建共享CNN，再按use_yinyang选择双网格或原单网格模块。
         super().__init__()
         opts = Edict()
         opts.use_rgb = False
@@ -743,6 +746,7 @@ class OmniDS(nn.Module):
         return rho.masked_fill(~valid, 0.), radial.masked_fill(~valid, 0.)
 
     def _forward_yinyang(self, imgs, yang_to_yin_quality, yin_to_yang_quality, iters):
+        # 输入两张鱼眼和两路采样质量；输出Yin/Yang各自的初始化、逐轮预测和有效Mask。
         """OmniDS双网格数据流，体统一[B,C,D,H,W]；保留各自原生H/W。
 
         静态左Context单独采样；增强→GWC→双向Warp→Fusion→8通道聚合与GRU。
@@ -785,6 +789,7 @@ class OmniDS(nn.Module):
                 m.eval()
     
     def upsample_depth(self, depth, mask, valid_pixels=None):
+        # 原单网格路径的凸上采样：用3×3邻域恢复空间尺寸，双目模式不放大索引值。
         """Upsample depth using convex combination."""
         B, C, H, W = depth.shape
         factor = 2 ** self.opts.num_downsample
@@ -809,6 +814,7 @@ class OmniDS(nn.Module):
         return up_depth.reshape(B, C, factor * H, factor * W)
     
     def compute_reference_points_from_grids(self, grids, inv_depth_idx):
+        # 旧注意力接口：按连续深度索引插值Grid，生成各相机参考点；CNN-only主流程不调用。
         """Compute reference points using pre-computed lookup tables."""
         B = inv_depth_idx.shape[0]
         device = inv_depth_idx.device
@@ -844,6 +850,7 @@ class OmniDS(nn.Module):
         return reference_points
 
     def _sample_cnn_erp(self, cnn_feats_stacked, grids_tensor, inv_depth_idx, valid_mask=None):
+        # 原单网格动态Context：按当前索引采样各相机，再通过可见性和学习权重融合。
         """
         Sample CNN fisheye features to ERP with grid-validity masking and learned
         view weighting.
@@ -929,6 +936,7 @@ class OmniDS(nn.Module):
 
     def forward(self, imgs, grids=None, iters=None, test_mode=False, ocams=None, distilled=False, valid_mask=None, left_valid_mask=None,
                 yang_to_yin_quality=None, yin_to_yang_quality=None):
+        # 网络总入口：双网格执行扫描、增强、融合和GRU优化；否则执行原Similarity/GEV流程。
         """
         use_yinyang=True时：使用构造函数中的grid_package，grids不传。
         yang_to_yin_quality / yin_to_yang_quality位于各自目标网格[B,1,D,H,W]。
