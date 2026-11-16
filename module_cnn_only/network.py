@@ -556,15 +556,8 @@ class OmniDS(nn.Module):
             opts.equi_h, opts.equi_w = 320, 480
 
         self.opts = argparse(opts, varargin)
-        if self.opts.num_cams not in (2, 4):
-            raise ValueError('num_cams must be 2 or 4')
-        if self.opts.num_cams == 2:
-            if self.opts.get('use_triton', False):
-                raise ValueError('Stereo mode does not support the four-camera Triton kernels')
-            if self.opts.num_invdepth != self.opts.num_depth_samples:
-                raise ValueError('Stereo uses one complete candidate axis: num_invdepth == num_depth_samples')
-        if self.opts.num_cams == 4 and not (self.opts.use_group_variance and self.opts.use_dynamic_context):
-            raise ValueError('Ablation switches are stereo-only; four-camera mode retains both modules')
+        if self.opts.num_cams == 2 and self.opts.num_invdepth != self.opts.num_depth_samples:
+            raise ValueError('Stereo uses one complete candidate axis: num_invdepth == num_depth_samples')
         # CNN-ONLY: reject incompatible paths, including direct Python callers.
         if self.opts.use_dino_sim or self.opts.use_student:
             raise ValueError("CNN-only does not support use_dino_sim or the distilled student")
@@ -585,15 +578,6 @@ class OmniDS(nn.Module):
         factor = 2 ** self.opts.num_downsample
         self.erp_h = self.opts.equi_h // factor
         self.erp_w = self.opts.equi_w // factor
-        if self.opts.num_cams == 2:
-            spatial_factor = 8 if self.opts.get('gev_use_spatial_downsample', True) else 4
-            depth = self.opts.num_invdepth
-            levels = max(self.opts.sim_levels, self.opts.get('gev_num_pyramid_levels', 2))
-            if (self.opts.equi_h % factor or self.opts.equi_w % factor or
-                    min(self.erp_h, self.erp_w) <= 0 or
-                    self.erp_h % spatial_factor or self.erp_w % spatial_factor or
-                    depth < max(4, 2 ** (levels - 1)) or depth % 4):
-                raise ValueError('Stereo dimensions must fit the GEV U-Net and depth pyramids')
         
         cnn_dims = self.opts.base_channel
         dino_dims = self.opts.base_channel  # CNN-ONLY: legacy name for context channels.
@@ -721,8 +705,6 @@ class OmniDS(nn.Module):
         from module_cnn_only.geometry_aware_fusion import GeometryAwareFeatureFusion
         from module_cnn_only.depth_refinement import StereoDepthRefinement
 
-        if grid_package is None or self.opts.num_cams != 2:
-            raise ValueError('use_yinyang requires num_cams=2 and a calibrated grid_package')
         if (self.opts.use_group_variance or self.opts.use_dynamic_context or
                 self.opts.get('encoder_downsample_twice', False) or self.opts.get('use_dav2_geometry', False)):
             raise ValueError('Yin-Yang V1 uses the stride-2 CNN, static context and GWC only; no DA-V2')
@@ -963,16 +945,8 @@ class OmniDS(nn.Module):
         Include the camera invalid_mask here unless invisible left pixels are
         already encoded as out-of-range coordinates in the left grid.
         """
-        # 旧模式未传iters时仍为12；双网格默认用refinement配置中的3轮。
-        if iters is None:
-            iters = self.refinement.gru_iters if self.opts.use_yinyang else 12
+        # 双网格iters=None由refinement使用配置中的默认轮数。
         if self.opts.use_yinyang:
-            if len(imgs) != 2 or iters < 1:
-                raise ValueError('Yin-Yang requires two images and positive iters')
-            if distilled or grids is not None or valid_mask is not None or left_valid_mask is not None:
-                raise ValueError('Yin-Yang uses its geometry-package grids/masks, not legacy grid arguments')
-            if yang_to_yin_quality is None or yin_to_yang_quality is None:
-                raise ValueError('Yin-Yang requires explicit continuous sampling quality in both directions')
             # 支持opts.mixed_precision及外层autocast；几何采样仍由原函数保持FP32。
             device_type = imgs[0].device.type
             enabled = self.opts.mixed_precision or torch.is_autocast_enabled(device_type)
@@ -981,18 +955,7 @@ class OmniDS(nn.Module):
             if test_mode:
                 return {name: row['final_depth_idx'] for name, row in result.items()}
             return result
-        if len(imgs) != self.opts.num_cams or len(grids) != self.opts.num_cams or iters < 1:
-            raise ValueError('Expected num_cams images/grids and at least one iteration')
-        if self.opts.num_cams == 2:
-            if any(img.shape != imgs[0].shape or img.device != imgs[0].device for img in imgs):
-                raise ValueError('Stereo images must have matching shapes and devices')
-            if imgs[0].ndim != 4 or imgs[0].shape[1] not in (1, 3):
-                raise ValueError('Stereo images must be [B,1/3,H,W]')
-            shape = (imgs[0].shape[0], 1, self.opts.num_invdepth, self.erp_h, self.erp_w)
-            if valid_mask is None or valid_mask.dtype != torch.bool or tuple(valid_mask.shape) != shape:
-                raise ValueError(f'Stereo valid_mask must be boolean with shape {shape}')
-        elif valid_mask is not None:
-            raise ValueError('Candidate masks are currently supported only in stereo mode')
+        iters = 12 if iters is None else iters
         with autocast(enabled=self.opts.mixed_precision):
             # CNN-ONLY: keep forward signature, but never execute DINO or its student.
             if distilled:
@@ -1028,13 +991,7 @@ class OmniDS(nn.Module):
         valid_pixels = None
         context_valid = None
         if self.opts.num_cams == 2:
-            expected = (self.erp_h, self.erp_w, self.opts.num_invdepth, 2)
-            if any(tuple(g.shape) != expected for g in grids_tensor):
-                raise ValueError(f'Stereo grids must each have shape {expected}')
             grids_tensor = [g.to(device=cnn_feats_stacked.device, dtype=torch.float32) for g in grids_tensor]
-            left = grids_tensor[0]
-            if not torch.allclose(left, left[:, :, :1].expand_as(left), rtol=0, atol=1e-6, equal_nan=True):
-                raise ValueError('The left-camera-centred reference grid must be constant along D')
             valid_mask = valid_mask.to(cnn_feats_stacked.device)
             for g in grids_tensor:
                 visible = (torch.isfinite(g).all(-1) & (g.abs() <= 1).all(-1)).permute(2, 0, 1)
@@ -1046,8 +1003,6 @@ class OmniDS(nn.Module):
             context_valid = (torch.isfinite(left_grid).all(-1) & (left_grid.abs() <= 1).all(-1))[None, None]
             context_valid = context_valid.expand(B, -1, -1, -1)
             if left_valid_mask is not None:
-                if left_valid_mask.dtype != torch.bool or tuple(left_valid_mask.shape) != (B, 1, self.erp_h, self.erp_w):
-                    raise ValueError('left_valid_mask must be bool [B,1,H,W]')
                 left_valid_mask = left_valid_mask.to(context_valid.device)
                 context_valid = context_valid & left_valid_mask
                 # Left-invalid pixels cannot contribute matching evidence either.
