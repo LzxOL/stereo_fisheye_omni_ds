@@ -68,6 +68,12 @@ parser.add_argument('--no_augment', action='store_true', help='disable stereo sh
 parser.add_argument('--no_gt_occlusion_check', action='store_true', help='disable observed-point-cloud visibility checks')
 parser.add_argument('--max_train_steps', type=int, help='stereo bounded smoke run; stop after this many training batches')
 parser.add_argument('--max_eval_samples', type=int, help='stereo bounded validation sample count')
+parser.add_argument('--use_local_spherical_encoder', action='store_true')
+parser.add_argument('--local_width', type=int, default=16)
+parser.add_argument('--local_layers', type=int, default=2)
+parser.add_argument('--local_rgb_stride', type=int, default=2, help='RGB angular samples per chart interval / CNN stride')
+parser.add_argument('--freeze_local_cnn', action='store_true')
+parser.add_argument('--local_only', action='store_true', help='replace supported global features with local features')
 parser.add_argument('--use_yinyang', action='store_true', help='use the calibrated Yin/Yang frontend and existing DA-V2/GRU backbone')
 parser.add_argument('--yinyang_cache', help='frozen grid_v1_geometry prefix, without .npz suffix')
 parser.add_argument('--gradient_checkpointing', action='store_true', help='recompute local refiner and stateless GRU update convolutions during backward')
@@ -192,6 +198,8 @@ if args.stereo:
         parser.error('--use_dav2_geometry requires --reference_grid left_fisheye and base_channel=32')
     if args.name == parser.get_default('name'):
         args.name = 'OmniDS_Stereo_DAV2_Context' if args.use_dav2_geometry else 'OmniDS_Stereo_Basic'
+        if args.use_local_spherical_encoder:
+            args.name += '_YinYang_Local'
 elif (args.ref_cam or args.target_cam or args.max_train_steps is not None or args.max_eval_samples is not None
       or args.reference_grid != 'local_erp'):
     parser.error('Camera-pair and bounded-smoke options require --stereo')
@@ -199,6 +207,8 @@ if args.use_dav2_geometry:
     if not args.stereo or args.dav2_input_size < 14:
         parser.error('--use_dav2_geometry requires --stereo and dav2_input_size>=14')
     from module_cnn_only.dav2_geometry import prepare_dav2_rgb
+if args.use_local_spherical_encoder and not args.use_yinyang:
+    parser.error("--use_local_spherical_encoder requires --use_yinyang")
 if args.use_yinyang and (not args.stereo or args.reference_grid != 'left_fisheye' or not args.yinyang_cache):
     parser.error('--use_yinyang requires --stereo --reference_grid left_fisheye --yinyang_cache PREFIX')
 
@@ -249,6 +259,8 @@ if args.stereo:
     opts.net_opts.use_group_variance = args.use_group_variance
     opts.net_opts.reference_grid = args.reference_grid
     opts.net_opts.use_dav2_geometry = args.use_dav2_geometry
+    for key in ('use_local_spherical_encoder','local_width','local_layers','local_rgb_stride','freeze_local_cnn','local_only'):
+        opts.net_opts[key] = getattr(args,key)
     opts.net_opts.use_yinyang = args.use_yinyang
     opts.net_opts.training_geometry = args.use_yinyang
     opts.net_opts.yinyang_output = 'left_fisheye' if args.use_yinyang else 'native'
@@ -369,7 +381,11 @@ def train(epoch_total, load_state):
         LOG_INFO(f"  DINO model: {opts.net_opts.dino_model}, freeze: {opts.net_opts.freeze_dino}")
     LOG_INFO(f"  GEV groups: {opts.net_opts.gev_num_groups}, reg_channels: {opts.net_opts.gev_reg_channels}")
     LOG_INFO(f"  GEV pyramid: {opts.net_opts.gev_num_pyramid_levels} levels, radius {opts.net_opts.gev_radius}")
-    model = OmniDS(opts.net_opts, grid_package=package) if args.use_yinyang else OmniDS(opts.net_opts)
+    model = OmniDS(opts.net_opts, grid_package=package, local_cameras=(data.reference,data.target)) if args.use_yinyang else OmniDS(opts.net_opts)
+    if args.use_local_spherical_encoder:
+        for name, chart in model.local_spherical.charts.items():
+            supported, total = chart.support_counts
+            LOG_INFO(f'{name} local stereo support {supported}/{total} global candidates')
     net = nn.DataParallel(model).cuda()
     if args.use_dav2_geometry:
         LOG_INFO('DA-V2: frozen ViT-B blocks [2,5,8,11], trainable Context fusion before context/state heads; GEV unchanged')
@@ -406,9 +422,13 @@ def train(epoch_total, load_state):
             if args.stereo and snapshot.get('stereo_geometry') != data.metadata:
                 raise ValueError('Restore checkpoint stereo geometry differs; do not mix camera pairs/candidate axes')
             if args.stereo:
-                for key in ('use_group_variance', 'use_yinyang'):
+                for key in ('use_group_variance', 'use_yinyang', 'use_local_spherical_encoder'):
                     if snapshot['net_opts'].get(key, False) != opts.net_opts[key]:
                         raise ValueError(f'Restore checkpoint {key} differs; pass the matching ablation switch')
+                if args.use_local_spherical_encoder:
+                    for key in ('local_width','local_layers','local_rgb_stride','freeze_local_cnn','local_only'):
+                        if snapshot['net_opts'][key] != opts.net_opts[key]:
+                            raise ValueError(f'Restore checkpoint {key} differs')
                 if snapshot['net_opts'].get('use_dav2_geometry', False) != args.use_dav2_geometry:
                     raise ValueError('Restore checkpoint DA-V2 geometry mode differs; weights load strictly')
                 if args.use_dav2_geometry and snapshot['net_opts'].get('dav2_fusion_target', 'guide') != 'context':
@@ -491,10 +511,18 @@ def train(epoch_total, load_state):
 
     def stereo_forward(images, raw, training):
         # 复用同一入口；双网格内部扫描和跨网格融合后仍走已训练的DA-V2 Context / 原GRU。
-        rgb = (prepare_dav2_rgb(raw, args.dav2_model_repo, args.dav2_input_size).cuda()
+        rgb = (prepare_dav2_rgb(raw[0], args.dav2_model_repo, args.dav2_input_size).cuda()
                if args.use_dav2_geometry else None)
+        local_rgb = None
+        if args.use_local_spherical_encoder:
+            local_rgb = []
+            for image in raw:
+                image = torch.as_tensor(image)
+                if image.dtype != torch.uint8 or image.ndim != 4 or image.shape[-1] != 3:
+                    raise ValueError('Expected native uint8 RGB [B,H,W,3] for both cameras')
+                local_rgb.append(image.permute(0,3,1,2).cuda().float().div_(255))
         batch = images[0].shape[0]
-        return net.module(images, grids, iters=opts.train_iters, test_mode=not training, dav2_rgb=rgb,
+        return net.module(images, grids, iters=opts.train_iters, test_mode=not training, dav2_rgb=rgb, local_rgb=local_rgb,
                           valid_mask=None if args.use_yinyang else candidate_mask.expand(batch, -1, -1, -1, -1),
                           left_valid_mask=None if args.use_yinyang else left_mask.expand(batch, -1, -1, -1))
 
@@ -528,7 +556,7 @@ def train(epoch_total, load_state):
             # Pass ocams for principal point bias (if available)
             ocams = getattr(data, 'ocams', None)
             if args.stereo:
-                predictions = stereo_forward(imgs, raw_imgs[0], True)
+                predictions = stereo_forward(imgs, raw_imgs, True)
                 if args.use_yinyang:
                     valid = valid.bool() & net.module.output_valid[:, 0]
                     if not valid.any():
@@ -656,7 +684,7 @@ def train(epoch_total, load_state):
                 ocams = getattr(data, 'ocams', None)
                 with torch.no_grad():
                     if args.stereo:
-                        invdepth_idx = stereo_forward(imgs, raw_imgs[0][None], False)
+                        invdepth_idx = stereo_forward(imgs, [image[None] for image in raw_imgs], False)
                         if args.use_yinyang:
                             valid = valid.astype(bool) & toNumpy(net_eval.output_valid[0, 0])
                     elif args.cnn_only:

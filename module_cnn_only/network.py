@@ -518,7 +518,7 @@ class OmniDS(nn.Module):
     原始四目OmniDS使用module/network.py，不在此类中执行。
     """
 
-    def __init__(self, varargin=None, grid_package=None):  # 构造原CNN/DA-V2及GRU主干，可追加Yin-Yang匹配前端。
+    def __init__(self, varargin=None, grid_package=None, local_cameras=None):  # 构造原CNN/DA-V2及GRU主干，可追加Yin-Yang匹配前端。
         super().__init__()
         opts = Edict()
         opts.use_rgb = False
@@ -546,6 +546,7 @@ class OmniDS(nn.Module):
         opts.use_student = False
         opts.use_group_variance = False
         opts.num_cams = 2
+        opts.use_local_spherical_encoder = False
         opts.use_yinyang = False  # 在DA-V2/原GRU主干前增加双网格匹配前端。
         opts.gru_iters = 12
         opts.yinyang_output = 'native'
@@ -645,6 +646,15 @@ class OmniDS(nn.Module):
 
         if self.opts.use_yinyang:
             self._init_yinyang(grid_package)
+        if self.opts.use_local_spherical_encoder:
+            if not self.opts.use_yinyang:
+                raise ValueError('Local spherical features require use_yinyang')
+            from module_cnn_only.local_spherical_encoder import LocalSphericalEncoder
+            self.local_spherical = LocalSphericalEncoder(
+                grid_package, local_cameras, cnn_dims, self.opts.get('local_width',16),
+                self.opts.get('local_layers',2), self.opts.get('local_rgb_stride',2),
+                not self.opts.get('freeze_local_cnn',False), not self.opts.get('local_only',False),
+                self.depth_chunk, self.opts.gradient_checkpointing)
         self.debug_outputs = {}
 
     def _init_yinyang(self, grid_package):  # 只增加几何匹配前端，Context/GEV/UpdateBlock仍用已训练主干。
@@ -670,7 +680,13 @@ class OmniDS(nn.Module):
     def load_baseline_weights(self, state_dict):  # 显式继承DA-V2主干权重，新增双网格模块保留自身初始化。
         state = {key.removeprefix('module.'): value for key, value in state_dict.items()}
         current = self.state_dict()
-        added = ('enhancer.', 'warp.', 'fusion.', 'inverse_depth_candidates')
+        added = ()
+        if 'inverse_depth_candidates' not in state and not any(k.startswith(('enhancer.', 'fusion.')) for k in state):
+            added = ('enhancer.', 'warp.', 'fusion.', 'inverse_depth_candidates')
+        if not any(k.startswith('local_spherical.') for k in state):
+            added += ('local_spherical.',)
+        if 'inverse_depth_candidates' in state and 'inverse_depth_candidates' in current and not torch.equal(state['inverse_depth_candidates'].cpu(), self.inverse_depth_candidates.cpu()):
+            raise ValueError('Pretrained Yin/Yang candidate axis differs')
         shared = {key for key in current if not key.startswith(added)}
         unused = {'view_weight_head.0.weight', 'view_weight_head.0.bias',
                   'view_weight_head.2.weight', 'view_weight_head.2.bias'}
@@ -698,7 +714,7 @@ class OmniDS(nn.Module):
         radial = rho.reciprocal()
         return rho.masked_fill(~valid, 0.), radial.masked_fill(~valid, 0.)
 
-    def _build_yinyang_volumes(self, features, yang_to_yin_quality, yin_to_yang_quality):  # 双网格只准备匹配体和左Context，不在这里做最终深度预测。
+    def _build_yinyang_volumes(self, features, yang_to_yin_quality, yin_to_yang_quality, local_rgb=None):  # 双网格只准备匹配体和左Context，不在这里做最终深度预测。
         from experiments.local_spherical_grid.adaptive_local_grid_v1 import sweep_patch, sample_reference
         from module_cnn_only.similarity_context import groupwise_correlation_volume
 
@@ -707,6 +723,9 @@ class OmniDS(nn.Module):
             patch = self.training_geometry.patch(name) if hasattr(self, 'training_geometry') else getattr(self.grid_package, name)
             left, right, mask = sweep_patch(features, patch, self.depth_chunk)
             left, right = self.enhancer(left, right, patch.rays_ref, mask, patch.padding_valid)
+            guide = left.mean(dim=2)
+            if self.opts.use_local_spherical_encoder:
+                left, right = self.local_spherical(name, local_rgb, left, right, mask)
             # 原Similarity接口使用[B,C,H,W,D]；代价融合接口使用[B,G,D,H,W]。
             ref, target = [v.permute(0, 1, 3, 4, 2) for v in (left, right)]
             lg = torch.as_tensor(patch.left_grid, device=left.device, dtype=torch.float32)
@@ -717,7 +736,7 @@ class OmniDS(nn.Module):
             masks[name] = mask
             context, left_valid = sample_reference(features[0], patch)
             branches[name] = dict(profile=profile, profile_valid=mask, context=context, left_valid=left_valid,
-                                  left_grid=lg, guide=left.mean(dim=2))
+                                  left_grid=lg, guide=guide)
 
         if yang_to_yin_quality is None:
             batch = features[0].shape[0]
@@ -794,7 +813,7 @@ class OmniDS(nn.Module):
 
     def forward(self, imgs, grids=None, iters=None, test_mode=False, ocams=None, distilled=False,
                 valid_mask=None, left_valid_mask=None, dav2_rgb=None,
-                yang_to_yin_quality=None, yin_to_yang_quality=None):  # 匹配前端之后统一执行DA-V2融合、原Context/State投影和原GRU。
+                yang_to_yin_quality=None, yin_to_yang_quality=None, local_rgb=None):  # 匹配前端之后统一执行DA-V2融合、原Context/State投影和原GRU。
         """双网格只改变前端映射和代价融合，后半部分沿用DA-V2 Baseline。
 
         dav2_rgb为真实左RGB的官方预处理结果。Yin/Yang返回各自原生网格的
@@ -809,7 +828,7 @@ class OmniDS(nn.Module):
                 features = [feature.float() for feature in features]
             # 这里仅准备前端数据；两种模式都继续执行下面同一套DA-V2/GRU主干。
             if self.opts.use_yinyang:
-                branches = self._build_yinyang_volumes(features, yang_to_yin_quality, yin_to_yang_quality)
+                branches = self._build_yinyang_volumes(features, yang_to_yin_quality, yin_to_yang_quality, local_rgb)
             else:
                 branches = self._build_single_volume(features, grids, valid_mask, left_valid_mask)
 
