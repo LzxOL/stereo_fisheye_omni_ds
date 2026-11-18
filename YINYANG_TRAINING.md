@@ -75,6 +75,10 @@ GPU_ID=0 BATCH_SIZE=4 RESTORE_CKPT=/绝对路径/当前实验_eN.pth \
 
 恢复会严格加载模型、optimizer、scheduler、scaler和更新计数，并检查几何一致性。
 `--restore_ckpt` 与 `--pretrain_ckpt` 不能同时使用。
+训练脚本默认启用 CUDA OOM 自动恢复。失败进程退出后每 120 秒重试，
+从最新已写完的 epoch checkpoint 恢复，未保存的部分重跑。
+初次保存前发生 OOM 时沿用原启动方式。非 OOM 错误会直接退出。
+可通过 `OOM_RETRY_SECONDS` 调整间隔，用 `OOM_MIN_FREE_MIB` 指定启动前的 GPU 空闲显存门槛（默认关闭）。
 仅当显式设置 `PRETRAIN_CKPT` 时，脚本才会迁移旧双目权重；默认不设置。
 
 默认训练8704帧、验证512帧，官方1024张测试集保留；30轮和LR等参数均可通过末尾CLI覆盖。

@@ -13,7 +13,7 @@ if [[ -n "${RESTORE_CKPT:-}" ]]; then
 elif [[ -n "${PRETRAIN_CKPT:-}" ]]; then
   set -- --pretrain_ckpt "$PRETRAIN_CKPT" "$@"
 fi
-exec "${PYTHON_BIN:-/opt/pdf-omni-venv/bin/python}" -u train.py \
+exec "${PYTHON_BIN:-/opt/pdf-omni-venv/bin/python}" -u tools/retry_stereo_training.py \
   --stereo --ref_cam cam4 --target_cam cam3 --reference_grid left_fisheye \
   --use_yinyang --yinyang_cache "${YINYANG_CACHE:-/cache/adaptive_grid_v1_yin50_20261116/grid_v1_geometry}" \
   --use_dav2_geometry --dav2_model_repo /cache/models/Depth-Anything-V2 \

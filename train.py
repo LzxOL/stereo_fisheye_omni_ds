@@ -472,6 +472,14 @@ def train(epoch_total, load_state):
         step_fields = ['epoch', 'step', 'loss', 'mean_loss', 'lr', 'optimizer_updates', 'amp_scale',
                        'batch_size', 'step_seconds', 'valid_ratio', 'final_index_mae', 'peak_allocated_mib', 'peak_reserved_mib']
         metrics_path = osp.join(opts.model_dir, 'steps.csv')
+        if os.environ.get('STEREO_OOM_SUPERVISED') and osp.exists(metrics_path):
+            # 上次未保存的步骤会重跑，移除超出恢复点的监控记录。
+            pending_path = metrics_path + '.tmp'
+            with open(metrics_path, newline='') as source, open(pending_path, 'w', newline='') as dest:
+                writer = csv.DictWriter(dest, fieldnames=step_fields)
+                writer.writeheader()
+                writer.writerows(row for row in csv.DictReader(source) if int(row['step']) <= total_iters)
+            os.replace(pending_path, metrics_path)
         if not osp.exists(metrics_path):
             with open(metrics_path, 'w', newline='') as handle:
                 csv.DictWriter(handle, fieldnames=step_fields).writeheader()
@@ -722,7 +730,9 @@ def train(epoch_total, load_state):
                             training_args=vars(args), bounded_smoke=bool(args.max_train_steps),
                             usable_batches=usable_batches,
                             validation_errors=mean_errors.tolist() if mean_errors is not None else None)
-        torch.save(snapshot, savefilename)
+        pending_path = savefilename + '.tmp'
+        torch.save(snapshot, pending_path)
+        os.replace(pending_path, savefilename)
         if args.stereo:
             summary = dict(epoch=epoch + 1, train_loss=float(epoch_loss), optimizer_updates=optimizer_updates,
                            validation_errors=mean_errors.tolist() if mean_errors is not None else None,
@@ -742,5 +752,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except torch.cuda.OutOfMemoryError as error:
+        if not os.environ.get('STEREO_OOM_SUPERVISED') or 'CUDA out of memory' not in str(error):
+            raise
+        import traceback
+        traceback.print_exc()
+        sys.exit(75)
 
