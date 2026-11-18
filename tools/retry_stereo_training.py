@@ -25,22 +25,25 @@ def main():
     adaptive = os.environ.get('OOM_ADAPTIVE_BATCH') == '1'
     free_for_four = int(os.environ.get('OOM_BATCH4_FREE_MIB', '31000'))
     free_for_two = int(os.environ.get('OOM_BATCH2_FREE_MIB', '21500'))
+    free_for_one = int(os.environ.get('OOM_BATCH1_FREE_MIB', '0'))
     gpu = os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[0]
 
     def log(message):
         print(f'[{time.strftime("%Y-%m-%d %H:%M:%S %z")}] {message}', flush=True)
 
-    def wait_for_gpu(prefer_two):
+    def wait_for_gpu(max_batch):
         while min_free or adaptive:
             query = subprocess.check_output(['nvidia-smi', '-i', gpu, '--query-gpu=memory.free',
                                              '--format=csv,noheader,nounits'], text=True)
             free = int(query.strip())
             if adaptive:
-                if free >= free_for_four and not prefer_two:
+                if free >= free_for_four and max_batch >= 4:
                     return 4
-                if free >= free_for_two:
+                if free >= free_for_two and max_batch >= 2:
                     return 2
-                log(f'GPU {gpu}: {free} MiB free, batch 2 requires {free_for_two} MiB. Checking in {delay:g}s')
+                if free_for_one and free >= free_for_one:
+                    return 1
+                log(f'GPU {gpu}: {free} MiB free, waiting for at least {free_for_one or free_for_two} MiB. Checking in {delay:g}s')
                 time.sleep(delay)
                 continue
             if free >= min_free:
@@ -70,9 +73,9 @@ def main():
         checkpoint_flag = '--pretrain_ckpt' if args.pretrain_ckpt else '--restore_ckpt'
         if checkpoint is None and any(checkpoint_name.fullmatch(p.name) for p in run.iterdir()):
             raise SystemExit(f'{run} has checkpoints. Specify --restore_ckpt or use a new run name.')
-        prefer_two = False
+        max_batch = 4
         while True:
-            batch = wait_for_gpu(prefer_two)
+            batch = wait_for_gpu(max_batch)
             command = [sys.executable, '-u', 'train.py', '--name', args.name, *training_args]
             if batch is not None:
                 command.extend(['--batch_size', str(batch)])
@@ -85,7 +88,8 @@ def main():
             status = child.wait()
             if status != 75:
                 return status if status >= 0 else 128 - status
-            prefer_two = adaptive and batch == 4
+            if adaptive:
+                max_batch = 2 if batch == 4 else 1 if batch == 2 and free_for_one else 4
             saved = [(int(match[1]), p) for p in run.iterdir()
                      if (match := checkpoint_name.fullmatch(p.name)) and p.is_file()]
             if saved:
