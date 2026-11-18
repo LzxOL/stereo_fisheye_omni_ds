@@ -378,6 +378,9 @@ def train(epoch_total, load_state):
     LOG_INFO("Parameter Count: %d" % count_parameters(net))
 
     optimizer, scheduler = fetch_optimizer(net, total_num_steps)
+    adaptive_batch = args.stereo and os.environ.get('STEREO_ADAPTIVE_BATCH') == '1'
+    if adaptive_batch:
+        scheduler.reference_batch_size = opts.batch_size
     scaler = GradScaler(enabled=opts.net_opts.mixed_precision, init_scale=args.amp_init_scale)
 
     start_epoch = 0
@@ -424,6 +427,8 @@ def train(epoch_total, load_state):
             if args.stereo:
                 if 'scheduler' in snapshot:
                     scheduler.load_state_dict(snapshot['scheduler'])
+                    if adaptive_batch and 'reference_batch_size' not in snapshot['scheduler']:
+                        scheduler.reference_batch_size = snapshot.get('training_args', {}).get('batch_size', opts.batch_size)
                 if 'scaler' in snapshot:
                     scaler.load_state_dict(snapshot['scaler'])
                 optimizer_updates = snapshot.get('optimizer_updates', 0)
@@ -560,7 +565,12 @@ def train(epoch_total, load_state):
                 # Preserve the original optimizer/scheduler, but do not advance LR
                 # when AMP has skipped a stereo optimizer update.
                 if scaler.get_scale() >= previous_scale:
-                    scheduler.step()
+                    if adaptive_batch:
+                        # 按处理样本数推进原曲线，batch减半时每次更新推进半步。
+                        ratio = opts.batch_size / scheduler.reference_batch_size
+                        scheduler.step(min(scheduler.last_epoch + ratio, scheduler.total_steps - 1))
+                    else:
+                        scheduler.step()
                     optimizer_updates += 1
             else:
                 scheduler.step()
