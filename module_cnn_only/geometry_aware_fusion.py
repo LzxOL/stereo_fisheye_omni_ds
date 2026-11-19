@@ -45,8 +45,12 @@ class GeometryAwareFeatureFusion(nn.Module):
             consistency = (clean_self * clean_cross).masked_fill(~both, 0.)
             difference = (clean_self - clean_cross).abs().masked_fill(~both, 0.)
         quality = sampling_quality.float().masked_fill(~cross_valid, 0.).clamp(0., 1.)
-        features = torch.cat([clean_self, clean_cross, consistency, difference,
-                              self_valid.float(), cross_valid.float(), quality], dim=1)
+        features = torch.cat([
+            clean_self, clean_cross, consistency, difference,
+            self_valid.float(), cross_valid.float(), quality,
+        ], dim=1)
+
+        # 预测每路权重，再按可用观测做 softmax 和加权求和。
         with torch.autocast(device_type=self_cost.device.type, enabled=False):
             # 一致性是GWC的乘积，可能超过FP16的65504上限；不仅乘积，
             # 权重预测也保持FP32，否则Conv的autocast会把有限特征转成Inf。
@@ -63,8 +67,10 @@ class GeometryAwareFeatureFusion(nn.Module):
             fused = weights[:, :1] * clean_self + weights[:, 1:2] * clean_cross
         return fused.to(self_cost.dtype), valid, weights
 
-    def forward_bidirectional(self, yin_cost, yang_cost, yin_valid, yang_valid,
-                              warped, yang_to_yin_quality, yin_to_yang_quality):
+    def forward_bidirectional(
+        self, yin_cost, yang_cost, yin_valid, yang_valid,
+        warped, yang_to_yin_quality, yin_to_yang_quality,
+    ):
         """直接适配BidirectionalCrossGridWarp返回dict，不重新Warp或Resize。
 
         两个quality都须在各自目标网格上，Shape分别[B,1,D,Hy,Wy]/[B,1,D,Ha,Wa]。
@@ -76,9 +82,17 @@ class GeometryAwareFeatureFusion(nn.Module):
             from torch.utils.checkpoint import checkpoint
             # 点式融合没有BN/随机操作；反向重算，免于保存巨大的35通道拼接体。
             apply_fusion = partial(checkpoint, self, use_reentrant=False)
-        yin, ym, yw = apply_fusion(yin_cost, warped['yang_to_yin'], yin_valid,
-                           warped['yang_to_yin_valid'], yang_to_yin_quality)
-        yang, am, aw = apply_fusion(yang_cost, warped['yin_to_yang'], yang_valid,
-                            warped['yin_to_yang_valid'], yin_to_yang_quality)
-        return dict(fused_yin=yin, fused_yang=yang, yin_valid=ym, yang_valid=am,
-                    yin_weights=yw, yang_weights=aw)
+
+        yin, yin_mask, yin_weights = apply_fusion(
+            yin_cost, warped['yang_to_yin'],
+            yin_valid, warped['yang_to_yin_valid'], yang_to_yin_quality,
+        )
+        yang, yang_mask, yang_weights = apply_fusion(
+            yang_cost, warped['yin_to_yang'],
+            yang_valid, warped['yin_to_yang_valid'], yin_to_yang_quality,
+        )
+        return dict(
+            fused_yin=yin, fused_yang=yang,
+            yin_valid=yin_mask, yang_valid=yang_mask,
+            yin_weights=yin_weights, yang_weights=yang_weights,
+        )

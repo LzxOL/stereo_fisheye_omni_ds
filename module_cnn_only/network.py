@@ -651,10 +651,17 @@ class OmniDS(nn.Module):
                 raise ValueError('Local spherical features require use_yinyang')
             from module_cnn_only.local_spherical_encoder import LocalSphericalEncoder
             self.local_spherical = LocalSphericalEncoder(
-                grid_package, local_cameras, cnn_dims, self.opts.get('local_width',16),
-                self.opts.get('local_layers',2), self.opts.get('local_rgb_stride',2),
-                not self.opts.get('freeze_local_cnn',False), not self.opts.get('local_only',False),
-                self.depth_chunk, self.opts.gradient_checkpointing)
+                grid_package,
+                local_cameras,
+                channels=cnn_dims,
+                width=self.opts.get('local_width', 16),
+                layers=self.opts.get('local_layers', 2),
+                stride=self.opts.get('local_rgb_stride', 2),
+                train_encoder=not self.opts.get('freeze_local_cnn', False),
+                residual=not self.opts.get('local_only', False),
+                depth_chunk=self.depth_chunk,
+                recompute=self.opts.gradient_checkpointing,
+            )
         self.debug_outputs = {}
 
     def _init_yinyang(self, grid_package):  # 只增加几何匹配前端，Context/GEV/UpdateBlock仍用已训练主干。
@@ -681,11 +688,18 @@ class OmniDS(nn.Module):
         state = {key.removeprefix('module.'): value for key, value in state_dict.items()}
         current = self.state_dict()
         added = ()
-        if 'inverse_depth_candidates' not in state and not any(k.startswith(('enhancer.', 'fusion.')) for k in state):
+        if (
+            'inverse_depth_candidates' not in state
+            and not any(k.startswith(('enhancer.', 'fusion.')) for k in state)
+        ):
             added = ('enhancer.', 'warp.', 'fusion.', 'inverse_depth_candidates')
         if not any(k.startswith('local_spherical.') for k in state):
             added += ('local_spherical.',)
-        if 'inverse_depth_candidates' in state and 'inverse_depth_candidates' in current and not torch.equal(state['inverse_depth_candidates'].cpu(), self.inverse_depth_candidates.cpu()):
+        if (
+            'inverse_depth_candidates' in state
+            and 'inverse_depth_candidates' in current
+            and not torch.equal(state['inverse_depth_candidates'].cpu(), self.inverse_depth_candidates.cpu())
+        ):
             raise ValueError('Pretrained Yin/Yang candidate axis differs')
         shared = {key for key in current if not key.startswith(added)}
         unused = {'view_weight_head.0.weight', 'view_weight_head.0.bias',
@@ -714,43 +728,73 @@ class OmniDS(nn.Module):
         radial = rho.reciprocal()
         return rho.masked_fill(~valid, 0.), radial.masked_fill(~valid, 0.)
 
-    def _build_yinyang_volumes(self, features, yang_to_yin_quality, yin_to_yang_quality, local_rgb=None):  # 双网格只准备匹配体和左Context，不在这里做最终深度预测。
+    # 双网格只准备匹配体和左Context，不在这里做最终深度预测。
+    def _build_yinyang_volumes(
+        self, features, yang_to_yin_quality, yin_to_yang_quality, local_rgb=None,
+    ):
         from experiments.local_spherical_grid.adaptive_local_grid_v1 import sweep_patch, sample_reference
         from module_cnn_only.similarity_context import groupwise_correlation_volume
 
         branches, costs, masks = {}, {}, {}
         for name in ('yin', 'yang'):
-            patch = self.training_geometry.patch(name) if hasattr(self, 'training_geometry') else getattr(self.grid_package, name)
+            patch = (
+                self.training_geometry.patch(name)
+                if hasattr(self, 'training_geometry')
+                else getattr(self.grid_package, name)
+            )
+
             left, right, mask = sweep_patch(features, patch, self.depth_chunk)
             left, right = self.enhancer(left, right, patch.rays_ref, mask, patch.padding_valid)
+
+            # GEV Guide 取自融合前的左特征体。Global–Local 融合供后面的两路匹配使用。
             guide = left.mean(dim=2)
             if self.opts.use_local_spherical_encoder:
                 left, right = self.local_spherical(name, local_rgb, left, right, mask)
+
             # 原Similarity接口使用[B,C,H,W,D]；代价融合接口使用[B,G,D,H,W]。
             ref, target = [v.permute(0, 1, 3, 4, 2) for v in (left, right)]
             lg = torch.as_tensor(patch.left_grid, device=left.device, dtype=torch.float32)
             rg = torch.as_tensor(patch.right_grid, device=left.device, dtype=torch.float32).permute(1, 2, 0, 3)
             grids = [lg[:, :, None].expand(-1, -1, self.opts.num_invdepth, -1), rg]
-            profile = self.similarity_context.build_profile(grids=grids, spherical_volumes=[ref, target], valid_mask=mask)
-            costs[name] = groupwise_correlation_volume(ref, target, self.gev_module.num_groups).permute(0, 1, 4, 2, 3).contiguous()
+            profile = self.similarity_context.build_profile(
+                grids=grids, spherical_volumes=[ref, target], valid_mask=mask,
+            )
+            costs[name] = (
+                groupwise_correlation_volume(ref, target, self.gev_module.num_groups)
+                .permute(0, 1, 4, 2, 3)
+                .contiguous()
+            )
             masks[name] = mask
+
+            # 左 Context 从鱼眼 CNN 特征单独采样，供后面的 Context / State 投影。
             context, left_valid = sample_reference(features[0], patch)
-            branches[name] = dict(profile=profile, profile_valid=mask, context=context, left_valid=left_valid,
-                                  left_grid=lg, guide=guide)
+            branches[name] = dict(
+                profile=profile, profile_valid=mask,
+                context=context, left_valid=left_valid,
+                left_grid=lg, guide=guide,
+            )
 
         if yang_to_yin_quality is None:
             batch = features[0].shape[0]
             yang_to_yin_quality = self.training_geometry.cross_quality('yin', batch, self.opts.num_invdepth)
             yin_to_yang_quality = self.training_geometry.cross_quality('yang', batch, self.opts.num_invdepth)
+
+        # 先在重叠区域交换并融合两路 GWC，再逐网格构建 GEV 金字塔。
         warped = self.warp(costs['yin'], costs['yang'], masks['yin'], masks['yang'])
-        fused = self.fusion.forward_bidirectional(costs['yin'], costs['yang'], masks['yin'], masks['yang'],
-                                                 warped, yang_to_yin_quality, yin_to_yang_quality)
+        fused = self.fusion.forward_bidirectional(
+            costs['yin'], costs['yang'], masks['yin'], masks['yang'],
+            warped, yang_to_yin_quality, yin_to_yang_quality,
+        )
         for name, branch in branches.items():
-            valid = fused[name+'_valid'] & branch['left_valid'].unsqueeze(2)
-            self.gev_module.build_from_cost_volume(fused['fused_'+name], branch.pop('guide'), valid)
+            valid = fused[name + '_valid'] & branch['left_valid'].unsqueeze(2)
+            self.gev_module.build_from_cost_volume(fused['fused_' + name], branch.pop('guide'), valid)
             # 两套缓存仅保存Tensor引用，共用同一GEV权重，不能让Yang覆盖Yin的查询体。
-            branch.update(candidate_valid=valid, gev_pyramid=self.gev_module._gev_pyramid,
-                          gev_valid=self.gev_module._valid_pyramid, fusion_weights=fused[name+'_weights'])
+            branch.update(
+                candidate_valid=valid,
+                gev_pyramid=self.gev_module._gev_pyramid,
+                gev_valid=self.gev_module._valid_pyramid,
+                fusion_weights=fused[name + '_weights'],
+            )
         return branches
 
     def _build_single_volume(self, features, grids, valid_mask, left_valid_mask):  # 原DA-V2双目前端，计算保持不变。
@@ -811,9 +855,12 @@ class OmniDS(nn.Module):
     
 
 
-    def forward(self, imgs, grids=None, iters=None, test_mode=False, ocams=None, distilled=False,
-                valid_mask=None, left_valid_mask=None, dav2_rgb=None,
-                yang_to_yin_quality=None, yin_to_yang_quality=None, local_rgb=None):  # 匹配前端之后统一执行DA-V2融合、原Context/State投影和原GRU。
+    # 匹配前端之后统一执行DA-V2融合、原Context/State投影和原GRU。
+    def forward(
+        self, imgs, grids=None, iters=None, test_mode=False, ocams=None, distilled=False,
+        valid_mask=None, left_valid_mask=None, dav2_rgb=None,
+        yang_to_yin_quality=None, yin_to_yang_quality=None, local_rgb=None,
+    ):
         """双网格只改变前端映射和代价融合，后半部分沿用DA-V2 Baseline。
 
         dav2_rgb为真实左RGB的官方预处理结果。Yin/Yang返回各自原生网格的
@@ -828,7 +875,9 @@ class OmniDS(nn.Module):
                 features = [feature.float() for feature in features]
             # 这里仅准备前端数据；两种模式都继续执行下面同一套DA-V2/GRU主干。
             if self.opts.use_yinyang:
-                branches = self._build_yinyang_volumes(features, yang_to_yin_quality, yin_to_yang_quality, local_rgb)
+                branches = self._build_yinyang_volumes(
+                    features, yang_to_yin_quality, yin_to_yang_quality, local_rgb,
+                )
             else:
                 branches = self._build_single_volume(features, grids, valid_mask, left_valid_mask)
 
@@ -845,41 +894,73 @@ class OmniDS(nn.Module):
                 if self.opts.use_dav2_geometry:
                     geometry = self.dav2_geometry(
                         dav2_rgb, branch['left_grid'], imgs[0].shape[-2:], features[0].shape[-2:],
-                        left_valid, patch_feature=patch_feature)
+                        left_valid, patch_feature=patch_feature,
+                    )
                     cnn_context = self.geometry_fusion(cnn_context, geometry, left_valid)
 
                 # 恢复已训练的两路投影：同一增强Context同时初始化Context和Hidden。
                 context = torch.relu(self.context_proj(cnn_context)).masked_fill(~left_valid, 0.)
                 net = torch.tanh(self.state_proj(cnn_context)).masked_fill(~left_valid, 0.)
-                initial = torch.full((imgs[0].shape[0], 1, *context.shape[-2:]), self.opts.num_invdepth / 2,
-                                     device=context.device, dtype=features[0].dtype)
+                initial = torch.full(
+                    (imgs[0].shape[0], 1, *context.shape[-2:]),
+                    self.opts.num_invdepth / 2,
+                    device=context.device,
+                    dtype=features[0].dtype,
+                )
                 current = initial
                 predictions, native_predictions = [], []
+
+                # 给当前网格装入相应的查找体，再开始 GRU 更新。
                 self.gev_module._gev_pyramid = branch['gev_pyramid']
                 self.gev_module._valid_pyramid = branch['gev_valid']
                 self.similarity_context._candidate_valid = branch['profile_valid']
                 for itr in range(iters):
                     current = current.detach()
                     gev_feature = self.gev_module.lookup(current, radius=self._gev_radius)
-                    net, delta, up_mask = self.update_block(net, branch['profile'], context, gev_feature, current,
-                                                            no_upsample=test_mode and itr < iters-1)
-                    current = (current + delta).clamp(0, self.opts.num_invdepth-1).masked_fill(~pixels, 0.)
+                    net, delta, up_mask = self.update_block(
+                        net, branch['profile'], context, gev_feature, current,
+                        no_upsample=test_mode and itr < iters - 1,
+                    )
+                    current = (
+                        (current + delta)
+                        .clamp(0, self.opts.num_invdepth - 1)
+                        .masked_fill(~pixels, 0.)
+                    )
                     net = net.masked_fill(~pixels, 0.)
                     native_predictions.append(current)
                     if up_mask is not None:
-                        prediction = self.upsample_depth(current, up_mask, pixels).clamp(0, self.opts.num_invdepth-1)
-                        output_valid = F.interpolate(pixels.float(), scale_factor=2**self.opts.num_downsample, mode='nearest').bool()
+                        prediction = self.upsample_depth(current, up_mask, pixels).clamp(
+                            0, self.opts.num_invdepth - 1,
+                        )
+                        output_valid = F.interpolate(
+                            pixels.float(),
+                            scale_factor=2 ** self.opts.num_downsample,
+                            mode='nearest',
+                        ).bool()
                         predictions.append(prediction.masked_fill(~output_valid, 0.))
-                row = dict(predictions=predictions, native_predictions=native_predictions,
-                           init_depth_idx=initial.masked_fill(~pixels, 0.), final_depth_idx=predictions[-1],
-                           valid=output_valid, native_valid=pixels, candidate_valid=candidate_valid,
-                           gev_volume=branch['gev_pyramid'][0])
+
+                row = dict(
+                    predictions=predictions,
+                    native_predictions=native_predictions,
+                    init_depth_idx=initial.masked_fill(~pixels, 0.),
+                    final_depth_idx=predictions[-1],
+                    valid=output_valid,
+                    native_valid=pixels,
+                    candidate_valid=candidate_valid,
+                    gev_volume=branch['gev_pyramid'][0],
+                )
                 if self.opts.use_yinyang:
-                    row['inverse_depth'], row['radial_depth'] = self.index_to_depth(row['final_depth_idx'], output_valid)
+                    row['inverse_depth'], row['radial_depth'] = self.index_to_depth(
+                        row['final_depth_idx'], output_valid,
+                    )
                     row['fusion_weights'] = branch['fusion_weights']
                 result[name] = row
-                self.debug_outputs[name] = dict(context=list(context.shape), hidden=list(net.shape),
-                                                gev=list(branch['gev_pyramid'][0].shape), prediction=list(predictions[-1].shape))
+                self.debug_outputs[name] = dict(
+                    context=list(context.shape),
+                    hidden=list(net.shape),
+                    gev=list(branch['gev_pyramid'][0].shape),
+                    prediction=list(predictions[-1].shape),
+                )
 
         self.gev_module.clear_cache()
         self.similarity_context._candidate_valid = None

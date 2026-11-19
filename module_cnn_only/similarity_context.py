@@ -301,7 +301,9 @@ class GEVModule(nn.Module):
             cur = F.avg_pool3d(cur, kernel_size=(2, 1, 1), stride=(2, 1, 1))
             self._gev_pyramid.append(cur)
             if self._valid_pyramid is not None:
-                support = F.max_pool3d(self._valid_pyramid[-1].float(), (2, 1, 1), (2, 1, 1)) > 0
+                support = F.max_pool3d(
+                    self._valid_pyramid[-1].float(), (2, 1, 1), (2, 1, 1),
+                ) > 0
                 self._valid_pyramid.append(support)
 
     def lookup(self, current_depth_idx, radius=4):
@@ -643,7 +645,11 @@ class SimilarityContextLookup(nn.Module):
         
         # Reshape: [B, D, H*W] → [B, H*W, D] so pooling applies to D dimension
         sim_flat = similarity_profile.view(B, D, H * W).permute(0, 2, 1)  # [B, H*W, D]
-        support = None if valid_mask is None else valid_mask[:, 0].reshape(B, D, H * W).permute(0, 2, 1)
+        # 与相似度一样把 D 放在最后，让有效性沿同一深度轴池化。
+        support = (
+            None if valid_mask is None
+            else valid_mask[:, 0].reshape(B, D, H * W).permute(0, 2, 1)
+        )
         
         for level in range(self.num_levels):
             # Pooling along depth dimension (last dim)
@@ -851,6 +857,7 @@ class SimilarityContext(nn.Module):
             profile = result
 
         # Apply spatial aggregation if enabled
+        # 聚合前屏蔽无效候选，聚合后再次屏蔽，避免出现原本没有的观测。
         if valid_mask is not None:
             profile = torch.where(valid_mask[:, 0], profile, 0.0)
         if self.use_spatial_aggregation and self.spatial_aggregator is not None:

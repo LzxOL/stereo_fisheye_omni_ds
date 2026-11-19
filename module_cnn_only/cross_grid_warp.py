@@ -43,6 +43,7 @@ def _warp_volume(volume, source_valid, query, depth_chunk):
         values = values.reshape(batch * count, groups, hs, ws)
         support = source_valid[:, :, start:stop].permute(0, 2, 1, 3, 4)
         support = support.reshape(batch * count, 1, hs, ws)
+
         # rays_ref=None：适配器直接提供已缓存的目标→源坐标和window mask。
         sampled, valid = sample_patch(values, query, None, support)
         volumes.append(sampled.reshape(batch, count, groups, ht, wt).permute(0, 2, 1, 3, 4))
@@ -64,6 +65,7 @@ class BidirectionalCrossGridWarp(nn.Module):
         self.depth_chunk = depth_chunk
         self.num_depth = len(package.metadata['inverse_depth_candidates'])
         self.yin_shape, self.yang_shape = tuple(package.yin.shape), tuple(package.yang.shape)
+
         for target, source in [('yin', 'yang'), ('yang', 'yin')]:
             patch = getattr(package, target)
             key, mask_key = target + '_to_' + source, target + '_in_' + source
@@ -84,10 +86,18 @@ class BidirectionalCrossGridWarp(nn.Module):
         # 源Padding也明确剔除，避免调用方误把Padding的Mask设成True。
         yin_support = yin_stereo_valid & self.yin_padding[None, None, None]
         yang_support = yang_stereo_valid & self.yang_padding[None, None, None]
+
         # Yang→Yin：在Yin位置查询Yang，故使用缓存key yin_to_yang。
         query_yin = _CachedQuery(self.yang_shape, self.yin_to_yang, self.yin_in_yang)
         yang_to_yin, valid_yin = _warp_volume(yang_cost, yang_support, query_yin, self.depth_chunk)
+
+        # Yin→Yang：在Yang位置查询Yin。
         query_yang = _CachedQuery(self.yin_shape, self.yang_to_yin, self.yang_in_yin)
         yin_to_yang, valid_yang = _warp_volume(yin_cost, yin_support, query_yang, self.depth_chunk)
-        return dict(yang_to_yin=yang_to_yin, yang_to_yin_valid=valid_yin,
-                    yin_to_yang=yin_to_yang, yin_to_yang_valid=valid_yang)
+
+        return dict(
+            yang_to_yin=yang_to_yin,
+            yang_to_yin_valid=valid_yin,
+            yin_to_yang=yin_to_yang,
+            yin_to_yang_valid=valid_yang,
+        )

@@ -35,8 +35,14 @@ def prepare_dav2_rgb(rgb, model_repo, input_size=518):
     rgb = np.asarray(rgb)
     if rgb.dtype != np.uint8 or rgb.ndim != 4 or rgb.shape[-1] != 3:
         raise ValueError('DA-V2 requires original RGB uint8 [B,H,W,3], not normalized CNN inputs')
-    resize = Resize(input_size, input_size, resize_target=False, keep_aspect_ratio=True,
-                    ensure_multiple_of=14, resize_method='lower_bound', image_interpolation_method=cv2.INTER_CUBIC)
+    resize = Resize(
+        input_size, input_size,
+        resize_target=False,
+        keep_aspect_ratio=True,
+        ensure_multiple_of=14,
+        resize_method='lower_bound',
+        image_interpolation_method=cv2.INTER_CUBIC,
+    )
     normalize = NormalizeImage(mean=[.485, .456, .406], std=[.229, .224, .225])
     prepare = PrepareForNet()
     # Official infer_image converts OpenCV BGR to RGB; dataset raw_imgs are
@@ -67,8 +73,12 @@ class ResidualRefine(nn.Module):
     def __init__(self):
         super().__init__()
         self.convs = nn.Sequential(
-            nn.Conv2d(32, 32, 3, padding=1, bias=False), nn.GroupNorm(8, 32), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, 3, padding=1, bias=False), nn.GroupNorm(8, 32))
+            nn.Conv2d(32, 32, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 32),
+        )
 
     def forward(self, x):
         return F.relu(x + self.convs(x))
@@ -88,8 +98,11 @@ class DAV2GeometryContext(nn.Module):
         self.backbone.requires_grad_(False).eval()
         self.projections = nn.ModuleList([nn.Conv2d(768, 32, 1) for _ in range(4)])
         self.fuse = nn.Sequential(
-            nn.Conv2d(128, 64, 3, padding=1, bias=False), nn.GroupNorm(8, 64), nn.ReLU(inplace=True),
-            nn.Conv2d(64, 32, 1))
+            nn.Conv2d(128, 64, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, 1),
+        )
         self.refine = ResidualRefine()
         self.last_shapes = {}
 
@@ -106,12 +119,21 @@ class DAV2GeometryContext(nn.Module):
         # allowed to save the frozen activations. Keep the ViT in FP32 under AMP.
         with torch.no_grad(), torch.autocast(device_type=rgb.device.type, enabled=False):
             tokens = self.backbone.get_intermediate_layers(rgb.float(), [2, 5, 8, 11])
-        maps = [token.transpose(1, 2).reshape(rgb.shape[0], 768, hv // 14, wv // 14) for token in tokens]
+
+        # 把每层 ViT 的 patch 序列还原成二维网格，再投影到 32 通道。
+        maps = [
+            token.transpose(1, 2).reshape(rgb.shape[0], 768, hv // 14, wv // 14)
+            for token in tokens
+        ]
         projected = [proj(feat) for proj, feat in zip(self.projections, maps)]
         patch_feature = self.fuse(torch.cat(projected, dim=1))  # [B,32,Hv/14,Wv/14]
-        self.last_shapes = dict(rgb=list(rgb.shape), tokens=[list(t.shape) for t in tokens],
-                                patch_maps=[list(m.shape) for m in maps],
-                                projected=[list(p.shape) for p in projected], patch_fused=list(patch_feature.shape))
+        self.last_shapes = dict(
+            rgb=list(rgb.shape),
+            tokens=[list(t.shape) for t in tokens],
+            patch_maps=[list(m.shape) for m in maps],
+            projected=[list(p.shape) for p in projected],
+            patch_fused=list(patch_feature.shape),
+        )
         return patch_feature
 
     def align_features(self, patch_feature, left_grid, image_size, cnn_size, left_valid, vit_size):
@@ -121,8 +143,10 @@ class DAV2GeometryContext(nn.Module):
         grid = grid[None].expand(patch_feature.shape[0], -1, -1, -1)
         # Border extension only interpolates the first/last patch centre. It
         # never turns an invalid original-image/FOV position into valid evidence.
-        aligned = F.grid_sample(patch_feature, grid.to(patch_feature.dtype), align_corners=False,
-                                mode='bilinear', padding_mode='border')
+        aligned = F.grid_sample(
+            patch_feature, grid.to(patch_feature.dtype),
+            align_corners=False, mode='bilinear', padding_mode='border',
+        )
         aligned = torch.where(left_valid, aligned, 0.)
         geometry = torch.where(left_valid, self.refine(aligned), 0.)
         self.last_shapes['geometry_context'] = list(geometry.shape)
@@ -140,8 +164,11 @@ class GeometryContextFusion(nn.Module):
     def __init__(self):
         super().__init__()
         self.residual = nn.Sequential(
-            nn.Conv2d(64, 32, 1, bias=False), nn.GroupNorm(8, 32), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, 1))
+            nn.Conv2d(64, 32, 1, bias=False),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, 1),
+        )
         # Small, NONZERO output: start close to the CNN context while allowing
         # adapter gradients on the very first update (a zero head blocks them).
         nn.init.normal_(self.residual[-1].weight, std=1e-3)

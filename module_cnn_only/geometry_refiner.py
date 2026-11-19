@@ -32,6 +32,7 @@ class GeometryEncoder(nn.Module):
         valid = valid & torch.isfinite(xyz).all(dim=-1)
         # Padding射线为NaN：必须在乘Fourier矩阵前清除，不能用 NaN * 0。
         xyz = xyz.masked_fill(~valid[..., None], 0.0)
+
         # 相位保持FP32；外层AMP不应把高频随机投影先量化到FP16。
         with torch.autocast(device_type=xyz.device.type, enabled=False):
             phase = (2.0 * math.pi) * (xyz @ self.B.float())
@@ -60,7 +61,9 @@ class LocalFeatureRefiner(nn.Module):
 
     def _refine_slice(self, feature, geo, mask):
         base = feature.masked_fill(~mask, 0.0)
-        fused = torch.cat([base, geo.masked_fill(~mask, 0.0), mask.to(base.dtype)], dim=1)
+        fused = torch.cat(
+            [base, geo.masked_fill(~mask, 0.0), mask.to(base.dtype)], dim=1,
+        )
         hidden = self.relu(self.fusion(fused))
         # 不让无效位置的1x1偏置经3x3传播到有效邻居；不做补洞或权重重归一化。
         hidden = hidden.masked_fill(~mask, 0.0)
@@ -74,6 +77,7 @@ class LocalFeatureRefiner(nn.Module):
         valid = valid & padding[None, None, None]
         geometry = geometry.to(dtype=volume.dtype)
         outputs = []
+
         for start in range(0, depth, self.depth_chunk):
             stop = min(start + self.depth_chunk, depth)
             count = stop - start
@@ -84,11 +88,13 @@ class LocalFeatureRefiner(nn.Module):
             mask = mask.reshape(batch * count, 1, height, width)
             geo = geometry[:, None].expand(-1, count, -1, -1, -1)
             geo = geo.reshape(batch * count, geometry.shape[1], height, width)
+
             if self.use_checkpoint and self.training:
                 from torch.utils.checkpoint import checkpoint
                 enhanced = checkpoint(self._refine_slice, feature, geo, mask, use_reentrant=False)
             else:
                 enhanced = self._refine_slice(feature, geo, mask)
+
             enhanced = enhanced.reshape(batch, count, channels, height, width)
             outputs.append(enhanced.permute(0, 2, 1, 3, 4))
         # 分块限制单次Conv2d工作量；训练时autograd仍保留反向所需的中间量。
@@ -101,8 +107,10 @@ class GeometryAwareFeatureEnhancer(nn.Module):
     Geometry Encoder每次只调用一次，产生 [B,16,H,W]；不对Yin/Yang进行resize。
     最后一层零初始化时，首轮GE/1x1的梯度值为0；末层更新后即可传入上游。
     """
-    def __init__(self, channels=32, geometry_channels=16, depth_chunk=8,
-                 mapping_size=256, fourier_scale=10.0):
+    def __init__(
+        self, channels=32, geometry_channels=16, depth_chunk=8,
+        mapping_size=256, fourier_scale=10.0,
+    ):
         super().__init__()
         self.geometry_encoder = GeometryEncoder(geometry_channels, mapping_size, fourier_scale)
         self.local_refiner = LocalFeatureRefiner(channels, geometry_channels, depth_chunk)
