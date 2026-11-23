@@ -6,6 +6,7 @@ OCam and Rig transforms. Missing Rig-observed surfaces remain unsupervised.
 """
 from pathlib import Path
 import hashlib
+import json
 import numpy as np
 from PIL import Image
 import torch
@@ -257,6 +258,8 @@ class StereoDataset(Dataset):
         self.opts.train_idx, self.opts.test_idx = self.train_idx, self.test_idx
         self.train_size, self.test_size = len(self.train_idx), len(self.test_idx)
         self.augment, self.gt_width, self.check_occlusion = augment, gt_width, check_occlusion
+        self.mesh_gt_root = None
+        self.mesh_gt_mode = None
         self.metadata = dict(reference=f'cam{self.ref_index+1}', target=f'cam{self.target_index+1}',
                              camera_ids=[str(self.reference.id), str(self.target.id)],
                              calibration=yaml.safe_load((self.root / 'config.yaml').read_text()),
@@ -276,6 +279,75 @@ class StereoDataset(Dataset):
             self.metadata.update(reference_grid='left_fisheye',
                                  reference_pixel_bounds=[0, self.reference.width - 1, 0, self.reference.height - 1],
                                  grid_convention='full_left_fisheye_pixels_output_linspace_strided_2_CNN_stride2_centres')
+
+    def _validate_mesh_gt_archive(self, root, extra_expected=None):
+        from experiments.local_spherical_grid.adaptive_local_grid_v1 import calibration_hash
+
+        root = Path(root)
+        format_name = 'omnithings-yinyang-mesh-gt-v1'
+        document = (root / 'dataset.json').read_bytes()
+        manifest = json.loads(document)
+        finished = json.loads((root / 'complete.json').read_text())
+        digest = hashlib.sha256(document).hexdigest()
+        if finished != dict(format=format_name, dataset_sha256=digest,
+                            samples=self.metadata['official_train_count'] + self.metadata['official_test_count']):
+            raise ValueError('Mesh GT archive is incomplete or its manifest has changed')
+        expected = dict(format=format_name, dataset='omnithings', reference=self.metadata['reference'],
+                        target=self.metadata['target'], reference_grid=self.reference_grid,
+                        output_size=list(self.output_size), inverse_depth_axis=self.axis.tolist(),
+                        calibration_hash=calibration_hash(self.reference, self.target))
+        if extra_expected:
+            expected.update(extra_expected)
+        if self.reference_grid != 'left_fisheye' or any(manifest.get(key) != value for key, value in expected.items()):
+            raise ValueError('Mesh GT camera, output grid, or inverse-depth candidates do not match')
+        if set(manifest['splits']['official_train']) != (set(self.train_idx) | set(self.test_idx)):
+            raise ValueError('Mesh GT does not cover this dataset official training split')
+        return root, format_name, digest, manifest
+
+    def use_mesh_gt(self, root, grid_package):
+        """Attach a fully verified mesh archive for this exact Yin–Yang output grid."""
+        from experiments.local_spherical_grid.adaptive_local_grid_v1 import array_hash
+
+        root, format_name, digest, _ = self._validate_mesh_gt_archive(
+            root, extra_expected=dict(candidate_mask_sha256=array_hash(grid_package.reference['stereo_valid'])))
+        self.mesh_gt_root = root
+        self.mesh_gt_mode = 'yinyang'
+        self.metadata['mesh_gt'] = dict(format=format_name, dataset_sha256=digest)
+
+    def use_single_grid_mesh_gt(self, root):
+        """Read the recovered cam4 depth using the single-grid camera support."""
+        root, format_name, digest, _ = self._validate_mesh_gt_archive(root)
+        self.mesh_gt_root = root
+        self.mesh_gt_mode = 'single_grid'
+        self.metadata['mesh_gt'] = dict(
+            format=format_name, dataset_sha256=digest,
+            support='mesh_right_visibility_and_single_grid_bracketing_candidates')
+
+    def _load_mesh_gt_index(self, frame):
+        path = self.mesh_gt_root / 'frames' / f'{frame:05d}.npz'
+        with np.load(path, allow_pickle=False) as label:
+            inverse = label['inverse_depth_gt']
+            if self.mesh_gt_mode == 'yinyang':
+                valid = label['stereo_valid_mask']
+                if inverse.shape != self.output_size or inverse.dtype != np.float32 or valid.shape != self.output_size or valid.dtype != np.bool_:
+                    raise ValueError(f'Mesh GT shape or dtype differs from training: {path}')
+                selected = inverse[valid].astype(np.float64)
+                if not np.isfinite(selected).all() or ((selected < self.axis[0]) | (selected > self.axis[-1])).any():
+                    raise ValueError(f'Supervised mesh GT lies outside the inverse-depth axis: {path}')
+                index = np.full(self.output_size, -1, dtype=np.float32)
+                index[valid] = (selected - self.axis[0]) / self.sample_step_invdepth
+                return index
+            visible = label['right_visibility_mask']
+            if inverse.shape != self.output_size or inverse.dtype != np.float32 or visible.shape != self.output_size or visible.dtype != np.bool_:
+                raise ValueError(f'Mesh GT shape or dtype differs from training: {path}')
+            within = np.isfinite(inverse) & (inverse >= self.axis[0]) & (inverse <= self.axis[-1])
+            y, x = np.nonzero(visible & within)
+            value = ((inverse[y, x].astype(np.float64) - self.axis[0]) / self.sample_step_invdepth).clip(0, self.num_invdepth - 1)
+            floor, ceil = np.floor(value).astype(int), np.ceil(value).astype(int)
+            valid = self.candidate_valid[0, floor, y // 2, x // 2] & self.candidate_valid[0, ceil, y // 2, x // 2]
+            index = np.full(self.output_size, -1, dtype=np.float32)
+            index[y[valid], x[valid]] = value[valid]
+            return index
 
     def __len__(self):
         return len(self.train_idx)
@@ -306,6 +378,8 @@ class StereoDataset(Dataset):
         return (images, raw) if out_raw_imgs else images
 
     def loadGTInvdepthIndex(self, fidx, remove_gt_noise=True, morph_win_size=5):
+        if self.mesh_gt_root is not None:
+            return self._load_mesh_gt_index(fidx)
         # This overrides, rather than calls, the original cropped Rig-centred loader.
         if self.gt_width is not None:
             path = self.root / (self.gt_depth_fmt % (self.gt_width, fidx))

@@ -547,10 +547,21 @@ class OmniDS(nn.Module):
         opts.use_group_variance = False
         opts.num_cams = 2
         opts.use_yinyang = False  # 在DA-V2/原GRU主干前增加双网格匹配前端。
+        opts.use_geometry_refiner = True  # 设为False时跳过Geometry Refiner，直接用原始球面扫描特征构建代价体。
+        opts.use_shallow_skip = False  # 设为True时给FeatureLayers增加浅层高频门控残差融合。
+        opts.yinyang_reproj_mode = 'bilinear'
+        opts.yinyang_bilateral_tau = 2.0
+        opts.yinyang_overlap_mode = 'q_soft'
+        opts.yinyang_disagree_delta = 3.0
+        opts.yinyang_disagree_gamma = 0.8
+        opts.yinyang_disagree_beta_max = 4.0
         opts.gru_iters = 12
         opts.yinyang_output = 'native'
         opts.gradient_checkpointing = False
         opts.use_dav2_geometry = False
+        opts.dav2_input_mode = 'raw_fisheye'   # 'raw_fisheye' (legacy) or 'yinyang_rot3' (Scheme I)
+        opts.dav2_chart_input_size = 336       # short side (multiple of 14) for Scheme I Yin/Yang unwarped charts
+        opts.dav2_entropy_gate = False         # Scheme II: GEV matching-entropy gated DA-V2 context fusion
         self.opts = argparse(opts, varargin)
         if self.opts.num_cams != 2:
             raise ValueError('CNN-only now uses stereo static context; use module.network.OmniDS for four cameras')
@@ -564,7 +575,8 @@ class OmniDS(nn.Module):
         self.encoder = FeatureLayers(
             self.opts.base_channel, 
             self.opts.use_rgb,
-            getattr(self.opts, 'encoder_downsample_twice', False)
+            getattr(self.opts, 'encoder_downsample_twice', False),
+            use_shallow_skip=self.opts.use_shallow_skip,
         )
         
         # Compute downsampled ERP size
@@ -639,16 +651,25 @@ class OmniDS(nn.Module):
             if self.opts.get('dav2_fusion_target', 'context') != 'context':
                 raise ValueError('This model uses DA-V2 Context fusion, not the previous GEV Guide fusion')
             self.opts.dav2_fusion_target = 'context'
-            from module_cnn_only.dav2_geometry import DAV2GeometryContext, GeometryContextFusion
+            from module_cnn_only.dav2_geometry import (
+                DAV2_INPUT_MODES, DAV2GeometryContext,
+                GeometryContextFusion, EntropyGatedGeometryContextFusion,
+            )
+            if self.opts.dav2_input_mode not in DAV2_INPUT_MODES:
+                raise ValueError(f'Unknown dav2_input_mode: {self.opts.dav2_input_mode!r}; expected {DAV2_INPUT_MODES}')
+            if self.opts.dav2_input_mode == 'yinyang_rot3' and not self.opts.use_yinyang:
+                raise ValueError('dav2_input_mode=yinyang_rot3 requires use_yinyang=True')
             self.dav2_geometry = DAV2GeometryContext(self.opts.dav2_model_repo, self.opts.dav2_checkpoint)
-            self.geometry_fusion = GeometryContextFusion()
+            if self.opts.dav2_entropy_gate:
+                self.geometry_fusion = EntropyGatedGeometryContextFusion()
+            else:
+                self.geometry_fusion = GeometryContextFusion()
 
         if self.opts.use_yinyang:
             self._init_yinyang(grid_package)
         self.debug_outputs = {}
 
     def _init_yinyang(self, grid_package):  # 只增加几何匹配前端，Context/GEV/UpdateBlock仍用已训练主干。
-        from module_cnn_only.geometry_refiner import GeometryAwareFeatureEnhancer
         from module_cnn_only.cross_grid_warp import BidirectionalCrossGridWarp
         from module_cnn_only.geometry_aware_fusion import GeometryAwareFeatureFusion
 
@@ -658,22 +679,54 @@ class OmniDS(nn.Module):
             raise ValueError('Yin-Yang uses the same D-axis as the baseline and fused GWC without variance')
         self.register_buffer('inverse_depth_candidates', axis)
         self.depth_chunk = self.opts.get('depth_chunk', 8)
-        self.enhancer = GeometryAwareFeatureEnhancer(self.opts.base_channel, depth_chunk=self.depth_chunk)
+        if self.opts.use_geometry_refiner:
+            from module_cnn_only.geometry_refiner import GeometryAwareFeatureEnhancer
+            self.enhancer = GeometryAwareFeatureEnhancer(self.opts.base_channel, depth_chunk=self.depth_chunk)
+            self.enhancer.local_refiner.use_checkpoint = self.opts.gradient_checkpointing
+        else:
+            self.enhancer = None
         self.warp = BidirectionalCrossGridWarp(grid_package, self.depth_chunk)
         self.fusion = GeometryAwareFeatureFusion(self.gev_module.num_groups)
         self.fusion.use_checkpoint = self.opts.gradient_checkpointing
         if self.opts.get('training_geometry', False):
             from module_cnn_only.yinyang_training import YinYangTrainingGeometry
-            self.training_geometry = YinYangTrainingGeometry(grid_package, 2**self.opts.num_downsample)
-        self.enhancer.local_refiner.use_checkpoint = self.opts.gradient_checkpointing
+            self.training_geometry = YinYangTrainingGeometry(
+                grid_package, 2**self.opts.num_downsample,
+                reproj_mode=self.opts.yinyang_reproj_mode,
+                bilateral_tau=self.opts.yinyang_bilateral_tau,
+                overlap_mode=self.opts.yinyang_overlap_mode,
+                disagree_delta=self.opts.yinyang_disagree_delta,
+                disagree_gamma=self.opts.yinyang_disagree_gamma,
+                disagree_beta_max=self.opts.yinyang_disagree_beta_max,
+            )
+        if self.opts.yinyang_overlap_mode == 'confidence_disagree':
+            hidden_dim = self.opts.base_channel * 2
+            self.confidence_head = nn.Sequential(
+                nn.Conv2d(hidden_dim, self.opts.base_channel, 3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(self.opts.base_channel, 1, 1),
+            )
+            # 末层零初始化：冷启动退化为已离线验证的 Q / (1 + spread) 几何先验。
+            nn.init.zeros_(self.confidence_head[-1].weight)
+            nn.init.zeros_(self.confidence_head[-1].bias)
+        else:
+            self.confidence_head = None
 
     def load_baseline_weights(self, state_dict):  # 显式继承DA-V2主干权重，新增双网格模块保留自身初始化。
         state = {key.removeprefix('module.'): value for key, value in state_dict.items()}
         current = self.state_dict()
-        added = ('enhancer.', 'warp.', 'fusion.', 'inverse_depth_candidates')
+        added = ('enhancer.', 'warp.', 'fusion.', 'confidence_head.',
+                 'training_geometry.spread_raw', 'encoder.shallow_proj.',
+                 'encoder.shallow_gate.', 'inverse_depth_candidates')
+        if self.opts.dav2_entropy_gate:
+            added = added + ('geometry_fusion.',)
         shared = {key for key in current if not key.startswith(added)}
         unused = {'view_weight_head.0.weight', 'view_weight_head.0.bias',
                   'view_weight_head.2.weight', 'view_weight_head.2.bias'}
+        if not self.opts.use_geometry_refiner:
+            unused |= {k for k in state if k.startswith('enhancer.')}
+        if self.opts.dav2_entropy_gate:
+            unused |= {k for k in state if k.startswith('geometry_fusion.')}
         missing = shared - state.keys()
         unexpected = state.keys() - shared - unused
         if missing or unexpected:
@@ -706,7 +759,11 @@ class OmniDS(nn.Module):
         for name in ('yin', 'yang'):
             patch = self.training_geometry.patch(name) if hasattr(self, 'training_geometry') else getattr(self.grid_package, name)
             left, right, mask = sweep_patch(features, patch, self.depth_chunk)
-            left, right = self.enhancer(left, right, patch.rays_ref, mask, patch.padding_valid)
+            if self.enhancer is not None:
+                left, right = self.enhancer(left, right, patch.rays_ref, mask, patch.padding_valid)
+            else:
+                left = left.masked_fill(~mask, 0.)
+                right = right.masked_fill(~mask, 0.)
             # 原Similarity接口使用[B,C,H,W,D]；代价融合接口使用[B,G,D,H,W]。
             ref, target = [v.permute(0, 1, 3, 4, 2) for v in (left, right)]
             lg = torch.as_tensor(patch.left_grid, device=left.device, dtype=torch.float32)
@@ -814,7 +871,8 @@ class OmniDS(nn.Module):
                 branches = self._build_single_volume(features, grids, valid_mask, left_valid_mask)
 
             patch_feature = None
-            if self.opts.use_dav2_geometry and self.opts.use_yinyang:
+            if (self.opts.use_dav2_geometry and self.opts.use_yinyang
+                    and self.opts.dav2_input_mode == 'raw_fisheye'):
                 patch_feature = self.dav2_geometry.extract_features(dav2_rgb)
             result = {}
             self.debug_outputs = {}
@@ -823,11 +881,24 @@ class OmniDS(nn.Module):
                 left_valid = branch['left_valid']
                 candidate_valid = branch['candidate_valid']
                 pixels = candidate_valid.any(dim=2)
+                gate_stats = None
                 if self.opts.use_dav2_geometry:
-                    geometry = self.dav2_geometry(
-                        dav2_rgb, branch['left_grid'], imgs[0].shape[-2:], features[0].shape[-2:],
-                        left_valid, patch_feature=patch_feature)
-                    cnn_context = self.geometry_fusion(cnn_context, geometry, left_valid)
+                    if self.opts.dav2_input_mode == 'yinyang_rot3':
+                        rot_k = 3 if name == 'yang' else 0
+                        geometry = self.dav2_geometry.extract_chart_geometry(
+                            dav2_rgb, branch['left_grid'], imgs[0].shape[-2:], features[0].shape[-2:],
+                            left_valid, chart_input_size=self.opts.dav2_chart_input_size, rot90_k=rot_k)
+                    else:
+                        geometry = self.dav2_geometry(
+                            dav2_rgb, branch['left_grid'], imgs[0].shape[-2:], features[0].shape[-2:],
+                            left_valid, patch_feature=patch_feature)
+                    if self.opts.dav2_entropy_gate:
+                        from module_cnn_only.dav2_geometry import compute_gev_uncertainty
+                        u_gev = compute_gev_uncertainty(branch['gev_pyramid'][0], candidate_valid)
+                        cnn_context = self.geometry_fusion(cnn_context, geometry, left_valid, u_gev)
+                        gate_stats = dict(self.geometry_fusion.last_gate_stats)
+                    else:
+                        cnn_context = self.geometry_fusion(cnn_context, geometry, left_valid)
 
                 # 恢复已训练的两路投影：同一增强Context同时初始化Context和Hidden。
                 context = torch.relu(self.context_proj(cnn_context)).masked_fill(~left_valid, 0.)
@@ -836,6 +907,7 @@ class OmniDS(nn.Module):
                                      device=context.device, dtype=features[0].dtype)
                 current = initial
                 predictions, native_predictions = [], []
+                conf_logits = [] if (self.opts.use_yinyang and self.confidence_head is not None) else None
                 self.gev_module._gev_pyramid = branch['gev_pyramid']
                 self.gev_module._valid_pyramid = branch['gev_valid']
                 self.similarity_context._candidate_valid = branch['profile_valid']
@@ -851,22 +923,37 @@ class OmniDS(nn.Module):
                         prediction = self.upsample_depth(current, up_mask, pixels).clamp(0, self.opts.num_invdepth-1)
                         output_valid = F.interpolate(pixels.float(), scale_factor=2**self.opts.num_downsample, mode='nearest').bool()
                         predictions.append(prediction.masked_fill(~output_valid, 0.))
+                        if conf_logits is not None:
+                            conf_native = self.confidence_head(net).masked_fill(~pixels, 0.)
+                            conf_up = F.interpolate(conf_native, scale_factor=2**self.opts.num_downsample, mode='nearest')
+                            conf_logits.append(conf_up.masked_fill(~output_valid, 0.))
                 row = dict(predictions=predictions, native_predictions=native_predictions,
                            init_depth_idx=initial.masked_fill(~pixels, 0.), final_depth_idx=predictions[-1],
                            valid=output_valid, native_valid=pixels, candidate_valid=candidate_valid,
                            gev_volume=branch['gev_pyramid'][0])
+                if conf_logits is not None:
+                    row['conf_logits'] = conf_logits
                 if self.opts.use_yinyang:
                     row['inverse_depth'], row['radial_depth'] = self.index_to_depth(row['final_depth_idx'], output_valid)
                     row['fusion_weights'] = branch['fusion_weights']
                 result[name] = row
                 self.debug_outputs[name] = dict(context=list(context.shape), hidden=list(net.shape),
                                                 gev=list(branch['gev_pyramid'][0].shape), prediction=list(predictions[-1].shape))
+                if gate_stats is not None:
+                    self.debug_outputs[name]['dav2_gate'] = gate_stats
 
         self.gev_module.clear_cache()
         self.similarity_context._candidate_valid = None
         if self.opts.use_yinyang and self.opts.yinyang_output == 'left_fisheye':
-            predictions, self.output_valid = self.training_geometry.project(result)
-            return predictions[-1] if test_mode else predictions
+            if test_mode:
+                predictions, self.output_valid = self.training_geometry.project(result)
+                self.branch_predictions = None
+                self.branch_valid = None
+                return predictions[-1]
+            predictions, self.output_valid, self.branch_predictions, self.branch_valid = self.training_geometry.project(
+                result, return_branches=True
+            )
+            return predictions
         if self.opts.use_yinyang:
             return {name: row['final_depth_idx'] for name, row in result.items()} if test_mode else result
         return result['left']['final_depth_idx'] if test_mode else result['left']['predictions']

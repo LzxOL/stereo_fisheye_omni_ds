@@ -117,8 +117,13 @@ def normalizeImage(image: np.ndarray, mask=None,
         image = image.squeeze().astype(np.float32)
         if mask is not None: image[mask] = np.nan
         # normalize intensities
-        image = (image - np.nanmean(image.flatten())) / \
-            np.nanstd(image.flatten())
+        std = float(np.nanstd(image.flatten()))
+        if not np.isfinite(std) or std < 1e-6:
+            std = 1.0
+        mean = float(np.nanmean(image.flatten()))
+        if not np.isfinite(mean):
+            mean = 0.0
+        image = (image - mean) / std
         if mask is not None: image[mask] = 0
         return image
     if len(image.shape) == 3 and image.shape[2] == 3:
@@ -131,8 +136,13 @@ def normalizeImage(image: np.ndarray, mask=None,
             mask = np.tile(mask[..., np.newaxis], (1, 1, 3))
             if mask is not None: image[mask] = np.nan
             # normalize intensities
-            image = (image - np.nanmean(image.flatten())) / \
-                np.nanstd(image.flatten())
+            std = float(np.nanstd(image.flatten()))
+            if not np.isfinite(std) or std < 1e-6:
+                std = 1.0
+            mean = float(np.nanmean(image.flatten()))
+            if not np.isfinite(mean):
+                mean = 0.0
+            image = (image - mean) / std
             if mask is not None: image[mask] = 0
             return image
     else:

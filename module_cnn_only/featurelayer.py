@@ -33,11 +33,12 @@ class Conv2D(torch.nn.Module):
 
 
 class FeatureLayers(torch.nn.Module):
-    def __init__(self, CH=32, use_rgb=False, downsample_twice=False):
+    def __init__(self, CH=32, use_rgb=False, downsample_twice=False, use_shallow_skip=False):
         super(FeatureLayers, self).__init__()
         layers = []
         self.use_rgb = use_rgb
         self.downsample_twice = downsample_twice
+        self.use_shallow_skip = use_shallow_skip
         in_channel = 3 if use_rgb else 1
         if downsample_twice:
             layers.append(nn.Sequential(Conv2D(in_channel, CH, 5, 2, 2),
@@ -50,6 +51,13 @@ class FeatureLayers(torch.nn.Module):
             layers += [Conv2D(CH, CH, 3, 1, d, dilation=d) for _ in range(2)]
         layers.append(Conv2D(CH, CH, 3, 1, 1, bn=False, relu=False))  # conv[18]
         self.layers = torch.nn.ModuleList(layers)
+        if use_shallow_skip:
+            # 浅层无空洞高频特征（layers[4] 后，感受野 13x13）经门控残差注入最终特征，
+            # 保留细栏杆/窄缝的高频 RGB 边界，同时维持大感受野在弱纹理区的稳定性。
+            self.shallow_proj = nn.Conv2d(CH, CH, 1)
+            self.shallow_gate = nn.Conv2d(2 * CH, CH, 1)
+            nn.init.zeros_(self.shallow_gate.weight)
+            nn.init.constant_(self.shallow_gate.bias, -2.0)
 
     def forward(self, im):
         # if input is list, combine batch dimension
@@ -63,10 +71,16 @@ class FeatureLayers(torch.nn.Module):
             im = torch.sum(im, dim=1, keepdim=True)
 
         x = self.layers[0](im)
+        shallow = None
         for i in range(1, 17, 2):
             x_ = self.layers[i](x)
             x = self.layers[i+1](x_, residual=x)
+            if self.use_shallow_skip and i == 3:
+                shallow = x
         x = self.layers[17](x)
+        if self.use_shallow_skip:
+            gate = torch.sigmoid(self.shallow_gate(torch.cat((x, shallow), dim=1)))
+            x = x + gate * self.shallow_proj(shallow)
 
         if is_list:
             x = torch.split(x, num_input*[batch_dim], dim=0)

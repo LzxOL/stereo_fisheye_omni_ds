@@ -61,15 +61,56 @@ parser.add_argument('--use_dav2_geometry', action='store_true', help='frozen DA-
 parser.add_argument('--dav2_model_repo', default='/cache/models/Depth-Anything-V2', help='official DA-V2 source checkout')
 parser.add_argument('--dav2_checkpoint', default='/cache/models/depth_anything_v2_vitb.pth', help='official DA-V2 Base weights')
 parser.add_argument('--dav2_input_size', type=int, default=518, help='official resize lower bound, rounded to multiples of 14')
+parser.add_argument('--dav2_input_mode', choices=('raw_fisheye', 'yinyang_rot3'), default='raw_fisheye',
+                    help='Scheme I: raw_fisheye (legacy 518 fisheye) or yinyang_rot3 (unwarped Yin + 90-deg CW gravity-aligned Yang)')
+parser.add_argument('--dav2_chart_input_size', type=int, default=336,
+                    help='Scheme I short-side resolution (multiple of 14) for unwarped Yin/Yang charts')
+parser.add_argument('--dav2_entropy_gate', action='store_true',
+                    help='Scheme II: gate DA-V2 context fusion by stereo GEV matching entropy H_gev')
 parser.add_argument('--val_count', type=int, default=512, help='stereo held-out official-training frames')
 parser.add_argument('--seed', type=int, default=0, help='stereo split and training seed')
 parser.add_argument('--gt_width', type=int, help='select complete raw GT TIFF width when multiple versions exist')
+parser.add_argument('--mesh_gt_root', help='verified cam4/cam3 mesh GT archive (e.g. OmniThings_cam4_cam3_YinYang_MeshGT_v1)')
 parser.add_argument('--no_augment', action='store_true', help='disable stereo shared photometric augmentation')
 parser.add_argument('--no_gt_occlusion_check', action='store_true', help='disable observed-point-cloud visibility checks')
 parser.add_argument('--max_train_steps', type=int, help='stereo bounded smoke run; stop after this many training batches')
 parser.add_argument('--max_eval_samples', type=int, help='stereo bounded validation sample count')
 parser.add_argument('--use_yinyang', action='store_true', help='use the calibrated Yin/Yang frontend and existing DA-V2/GRU backbone')
 parser.add_argument('--yinyang_cache', help='frozen grid_v1_geometry prefix, without .npz suffix')
+parser.add_argument('--use_geometry_refiner', dest='use_geometry_refiner', action='store_true', default=True,
+                    help='enable Yin/Yang Geometry-aware Feature Refiner (legacy default)')
+parser.add_argument('--no_geometry_refiner', dest='use_geometry_refiner', action='store_false',
+                    help='disable Yin/Yang Geometry-aware Feature Refiner and build GWC directly from swept features')
+parser.add_argument('--use_shallow_skip', action='store_true',
+                    help='inject gated shallow non-dilated CNN features (RF 13x13) into final encoder descriptors')
+parser.add_argument('--yinyang_reproj_mode', choices=('bilinear', 'bilateral', 'nearest'), default='bilinear',
+                    help='Yin/Yang chart-to-left-fisheye reprojection mode')
+parser.add_argument('--yinyang_bilateral_tau', type=float, default=2.0,
+                    help='depth-index affinity scale tau for bilateral edge-aware reprojection')
+parser.add_argument('--yinyang_overlap_mode', choices=('q_soft', 'q_hard', 'confidence_disagree'), default='q_soft',
+                    help='Yin/Yang overlap fusion mode on the left-fisheye grid')
+parser.add_argument('--yinyang_disagree_delta', type=float, default=3.0,
+                    help='branch disagreement threshold (candidate indices) for sharpening overlap weights')
+parser.add_argument('--yinyang_disagree_gamma', type=float, default=0.8,
+                    help='transition width for disagreement-adaptive overlap temperature')
+parser.add_argument('--yinyang_disagree_beta_max', type=float, default=4.0,
+                    help='maximum extra softmax sharpness when Yin and Yang strongly disagree')
+parser.add_argument('--yinyang_aux_weight', type=float, default=0.0,
+                    help='auxiliary per-branch (Yin/Yang) sequence loss weight during training')
+parser.add_argument('--fisheye_aniso_alpha', type=float, default=0.0,
+                    help='Exp-1: spherical pixel footprint anisotropy weighting strength (e.g. 0.5)')
+parser.add_argument('--fisheye_epi_weight', type=float, default=0.0,
+                    help='Exp-2: curved right-fisheye epipolar-arc reprojection loss weight (e.g. 0.5)')
+parser.add_argument('--fisheye_normal_weight', type=float, default=0.0,
+                    help='Exp-3a: distortion-invariant 3D spherical surface normal cosine loss weight (e.g. 0.5)')
+parser.add_argument('--fisheye_edge_alpha', type=float, default=0.0,
+                    help='Exp-3b: sharp GT depth-edge L1 upweighting strength (e.g. 1.0)')
+parser.add_argument('--fisheye_normal_last_iters', type=int, default=4,
+                    help='apply 3D spherical normal loss on the last K GRU iterations')
+parser.add_argument('--gradient_accumulation', type=int, default=1,
+                    help='gradient accumulation micro-batches per optimizer step')
+parser.add_argument('--stop_after_epoch', type=int, default=None,
+                    help='stop cleanly after completing this 1-indexed epoch (preserves total_epochs LR schedule)')
 parser.add_argument('--gradient_checkpointing', action='store_true', help='recompute local refiner and stateless GRU update convolutions during backward')
 parser.add_argument('--no_gradient_checkpointing', dest='gradient_checkpointing', action='store_false', help='store refiner activations for faster backward when memory permits')
 parser.add_argument('--gpu_memory_fraction', type=float, help='optional allocator budget on a GPU shared with other jobs')
@@ -196,11 +237,22 @@ elif (args.ref_cam or args.target_cam or args.max_train_steps is not None or arg
       or args.reference_grid != 'local_erp'):
     parser.error('Camera-pair and bounded-smoke options require --stereo')
 if args.use_dav2_geometry:
-    if not args.stereo or args.dav2_input_size < 14:
-        parser.error('--use_dav2_geometry requires --stereo and dav2_input_size>=14')
-    from module_cnn_only.dav2_geometry import prepare_dav2_rgb
+    if not args.stereo or args.dav2_input_size < 14 or args.dav2_chart_input_size < 14:
+        parser.error('--use_dav2_geometry requires --stereo and dav2_input_size/dav2_chart_input_size>=14')
+    if args.dav2_input_mode == 'yinyang_rot3' and not args.use_yinyang:
+        parser.error('--dav2_input_mode yinyang_rot3 requires --use_yinyang')
+    from module_cnn_only.dav2_geometry import prepare_dav2_rgb, prepare_dav2_raw_tensor
+elif args.dav2_input_mode != 'raw_fisheye' or args.dav2_entropy_gate:
+    parser.error('--dav2_input_mode and --dav2_entropy_gate require --use_dav2_geometry')
 if args.use_yinyang and (not args.stereo or args.reference_grid != 'left_fisheye' or not args.yinyang_cache):
     parser.error('--use_yinyang requires --stereo --reference_grid left_fisheye --yinyang_cache PREFIX')
+if args.mesh_gt_root and (not args.stereo or args.reference_grid != 'left_fisheye'):
+    parser.error('--mesh_gt_root requires --stereo --reference_grid left_fisheye')
+if not args.use_yinyang and (not args.use_geometry_refiner or args.yinyang_reproj_mode != 'bilinear'
+                             or args.yinyang_overlap_mode != 'q_soft' or args.yinyang_aux_weight != 0.0):
+    parser.error('Yin/Yang refiner, reprojection, overlap and auxiliary loss flags require --use_yinyang')
+if args.yinyang_aux_weight < 0 or args.yinyang_bilateral_tau <= 0 or args.yinyang_disagree_gamma <= 0 or args.yinyang_disagree_beta_max < 0:
+    parser.error('Invalid Yin/Yang reprojection/overlap/aux hyperparameters')
 
 if args.cnn_only and not args.stereo:
     parser.error('--cnn_only uses stereo static context; add --stereo and camera pair, or use original four-camera OmniDS without --cnn_only')
@@ -250,6 +302,14 @@ if args.stereo:
     opts.net_opts.reference_grid = args.reference_grid
     opts.net_opts.use_dav2_geometry = args.use_dav2_geometry
     opts.net_opts.use_yinyang = args.use_yinyang
+    opts.net_opts.use_geometry_refiner = args.use_geometry_refiner
+    opts.net_opts.use_shallow_skip = args.use_shallow_skip
+    opts.net_opts.yinyang_reproj_mode = args.yinyang_reproj_mode
+    opts.net_opts.yinyang_bilateral_tau = args.yinyang_bilateral_tau
+    opts.net_opts.yinyang_overlap_mode = args.yinyang_overlap_mode
+    opts.net_opts.yinyang_disagree_delta = args.yinyang_disagree_delta
+    opts.net_opts.yinyang_disagree_gamma = args.yinyang_disagree_gamma
+    opts.net_opts.yinyang_disagree_beta_max = args.yinyang_disagree_beta_max
     opts.net_opts.training_geometry = args.use_yinyang
     opts.net_opts.yinyang_output = 'left_fisheye' if args.use_yinyang else 'native'
     opts.net_opts.gradient_checkpointing = args.gradient_checkpointing
@@ -258,6 +318,9 @@ if args.stereo:
         opts.net_opts.dav2_model_repo = args.dav2_model_repo
         opts.net_opts.dav2_checkpoint = args.dav2_checkpoint
         opts.net_opts.dav2_input_size = args.dav2_input_size
+        opts.net_opts.dav2_input_mode = args.dav2_input_mode
+        opts.net_opts.dav2_chart_input_size = args.dav2_chart_input_size
+        opts.net_opts.dav2_entropy_gate = args.dav2_entropy_gate
 # ERP / cross-attention
 opts.net_opts.equi_h = args.equirect_size[0]
 opts.net_opts.equi_w = args.equirect_size[1]
@@ -349,17 +412,28 @@ def train(epoch_total, load_state):
         if tuple(package.reference['left_valid'].shape) != tuple(data.output_size):
             raise ValueError('Frozen grid reference output size differs from the left-fisheye GT grid')
         data.output_candidate_valid = package.reference['stereo_valid']
+        proj_tag = ('ray_correspondence_strict_bilinear_Q_weighted_overlap'
+                    if args.yinyang_reproj_mode == 'bilinear' and args.yinyang_overlap_mode == 'q_soft'
+                    else f'ray_correspondence_{args.yinyang_reproj_mode}_{args.yinyang_overlap_mode}')
         data.metadata['yinyang'] = dict(geometry=package.metadata,
                                       chart_shapes={n: list(getattr(package, n).shape) for n in ('yin', 'yang')},
-                                      output_projection='ray_correspondence_strict_bilinear_Q_weighted_overlap')
-        LOG_INFO('Yin/Yang native charts: %s; predictions projected by rays onto left GT %s' %
-                 (data.metadata['yinyang']['chart_shapes'], data.output_size))
+                                      output_projection=proj_tag)
+        if args.mesh_gt_root:
+            data.use_mesh_gt(args.mesh_gt_root, package)
+            LOG_INFO('Mesh GT loaded from %s using Yin/Yang stereo_valid_mask' % args.mesh_gt_root)
+        LOG_INFO('Yin/Yang native charts: %s; refiner=%s shallow_skip=%s reproj=%s overlap=%s aux=%.2f; RGB=%s' %
+                 (data.metadata['yinyang']['chart_shapes'], args.use_geometry_refiner, args.use_shallow_skip,
+                  args.yinyang_reproj_mode, args.yinyang_overlap_mode, args.yinyang_aux_weight, args.use_rgb))
+    elif args.mesh_gt_root:
+        data.use_single_grid_mesh_gt(args.mesh_gt_root)
+        LOG_INFO('Mesh GT loaded from %s using single-grid right_visibility_mask' % args.mesh_gt_root)
     dbloader = torch.utils.data.DataLoader(data, batch_size=opts.batch_size,
                                            pin_memory=True, shuffle=True,
                                            num_workers=args.num_workers, drop_last=True,
                                            persistent_workers=args.num_workers > 0,
                                            multiprocessing_context='spawn' if args.num_workers else None)
-    total_num_steps = len(dbloader)*opts.total_epochs
+    grad_accum = max(1, int(args.gradient_accumulation))
+    total_num_steps = ((len(dbloader) + grad_accum - 1) // grad_accum) * opts.total_epochs
 
     LOG_INFO("Using stereo CNN baseline: static context, group_variance=%s" %
              args.use_group_variance if args.stereo else
@@ -371,8 +445,24 @@ def train(epoch_total, load_state):
     LOG_INFO(f"  GEV pyramid: {opts.net_opts.gev_num_pyramid_levels} levels, radius {opts.net_opts.gev_radius}")
     model = OmniDS(opts.net_opts, grid_package=package) if args.use_yinyang else OmniDS(opts.net_opts)
     net = nn.DataParallel(model).cuda()
+    fisheye_loss = None
+    if args.use_yinyang and (args.fisheye_aniso_alpha > 0 or args.fisheye_epi_weight > 0
+                             or args.fisheye_normal_weight > 0 or args.fisheye_edge_alpha > 0):
+        from module_cnn_only.fisheye_losses import FisheyeGeometryLossPack
+        fisheye_loss = FisheyeGeometryLossPack(
+            data, package,
+            aniso_alpha=args.fisheye_aniso_alpha,
+            epi_weight=args.fisheye_epi_weight,
+            normal_weight=args.fisheye_normal_weight,
+            edge_alpha=args.fisheye_edge_alpha,
+            normal_last_iters=args.fisheye_normal_last_iters,
+        ).cuda()
+        LOG_INFO('Fisheye geometry loss enabled: aniso=%.2f epi=%.2f normal=%.2f (last %d iters) edge=%.2f; grad_accum=%d' %
+                 (args.fisheye_aniso_alpha, args.fisheye_epi_weight, args.fisheye_normal_weight,
+                  args.fisheye_normal_last_iters, args.fisheye_edge_alpha, grad_accum))
     if args.use_dav2_geometry:
-        LOG_INFO('DA-V2: frozen ViT-B blocks [2,5,8,11], trainable Context fusion before context/state heads; GEV unchanged')
+        LOG_INFO('DA-V2: frozen ViT-B blocks [2,5,8,11], input_mode=%s (chart_size=%d), entropy_gate=%s' %
+                 (args.dav2_input_mode, args.dav2_chart_input_size, args.dav2_entropy_gate))
     if opts.net_opts.fix_bn:
         net.module.freeze_bn()
     LOG_INFO("Parameter Count: %d" % count_parameters(net))
@@ -406,8 +496,12 @@ def train(epoch_total, load_state):
             if args.stereo and snapshot.get('stereo_geometry') != data.metadata:
                 raise ValueError('Restore checkpoint stereo geometry differs; do not mix camera pairs/candidate axes')
             if args.stereo:
-                for key in ('use_group_variance', 'use_yinyang'):
-                    if snapshot['net_opts'].get(key, False) != opts.net_opts[key]:
+                for key, default in (('use_group_variance', False), ('use_yinyang', False), ('use_rgb', False),
+                                     ('use_shallow_skip', False), ('use_geometry_refiner', True),
+                                     ('yinyang_reproj_mode', 'bilinear'), ('yinyang_overlap_mode', 'q_soft'),
+                                     ('dav2_input_mode', 'raw_fisheye'), ('dav2_chart_input_size', 336),
+                                     ('dav2_entropy_gate', False)):
+                    if snapshot['net_opts'].get(key, default) != opts.net_opts.get(key, default):
                         raise ValueError(f'Restore checkpoint {key} differs; pass the matching ablation switch')
                 if snapshot['net_opts'].get('use_dav2_geometry', False) != args.use_dav2_geometry:
                     raise ValueError('Restore checkpoint DA-V2 geometry mode differs; weights load strictly')
@@ -490,9 +584,14 @@ def train(epoch_total, load_state):
                 csv.DictWriter(handle, fieldnames=step_fields).writeheader()
 
     def stereo_forward(images, raw, training):
-        # 复用同一入口；双网格内部扫描和跨网格融合后仍走已训练的DA-V2 Context / 原GRU。
-        rgb = (prepare_dav2_rgb(raw, args.dav2_model_repo, args.dav2_input_size).cuda()
-               if args.use_dav2_geometry else None)
+        # 复用同一入口；Scheme I(yinyang_rot3)传原始[0,1]左图到GPU解畸变，旧模式保留518鱼眼输入。
+        if args.use_dav2_geometry:
+            if args.dav2_input_mode == 'yinyang_rot3':
+                rgb = prepare_dav2_raw_tensor(raw).cuda()
+            else:
+                rgb = prepare_dav2_rgb(raw, args.dav2_model_repo, args.dav2_input_size).cuda()
+        else:
+            rgb = None
         batch = images[0].shape[0]
         return net.module(images, grids, iters=opts.train_iters, test_mode=not training, dav2_rgb=rgb,
                           valid_mask=None if args.use_yinyang else candidate_mask.expand(batch, -1, -1, -1, -1),
@@ -507,6 +606,8 @@ def train(epoch_total, load_state):
         train_loss = 0
         epoch_loss = 0
         usable_batches = 0
+        accum_count = 0
+        optimizer.zero_grad()
         LOG_INFO('\nEpoch: %d' % epoch)
         if args.wandb:
             wandb.log({"Epoch": epoch}, step=total_iters)
@@ -524,13 +625,15 @@ def train(epoch_total, load_state):
                 LOG_INFO('Skipping stereo batch without valid supervision')
                 continue
 
-            optimizer.zero_grad()
+            if accum_count == 0:
+                optimizer.zero_grad()
             # Pass ocams for principal point bias (if available)
             ocams = getattr(data, 'ocams', None)
+            raw_gt_valid = valid.bool()
             if args.stereo:
                 predictions = stereo_forward(imgs, raw_imgs[0], True)
                 if args.use_yinyang:
-                    valid = valid.bool() & net.module.output_valid[:, 0]
+                    valid = raw_gt_valid & net.module.output_valid[:, 0]
                     if not valid.any():
                         raise ValueError('No overlap between projected dual-chart predictions and left GT')
             elif args.cnn_only:
@@ -542,7 +645,24 @@ def train(epoch_total, load_state):
                 LOG_INFO('Actual tensors: %s; left prediction %s' %
                          (net.module.debug_outputs, list(predictions[-1].shape)))
 
-            loss = sequence_loss(predictions, gt.unsqueeze(1), valid.unsqueeze(1))
+            if fisheye_loss is not None:
+                loss = fisheye_loss.sequence_loss(predictions, gt.unsqueeze(1), valid.unsqueeze(1))
+            else:
+                loss = sequence_loss(predictions, gt.unsqueeze(1), valid.unsqueeze(1))
+            if args.use_yinyang and args.yinyang_aux_weight > 0 and net.module.branch_predictions is not None:
+                for branch_name in ('yin', 'yang'):
+                    b_valid = raw_gt_valid & net.module.branch_valid[branch_name][:, 0]
+                    if b_valid.any():
+                        if fisheye_loss is not None:
+                            b_loss = fisheye_loss.sequence_loss(
+                                net.module.branch_predictions[branch_name], gt.unsqueeze(1), b_valid.unsqueeze(1),
+                                include_normal=False, include_epi=True,
+                            )
+                        else:
+                            b_loss = sequence_loss(
+                                net.module.branch_predictions[branch_name], gt.unsqueeze(1), b_valid.unsqueeze(1)
+                            )
+                        loss = loss + args.yinyang_aux_weight * b_loss
             
             train_loss += loss.data
             usable_batches += 1
@@ -555,26 +675,27 @@ def train(epoch_total, load_state):
                 LOG_INFO("Iter %d/%d training loss = %.3f, average training loss for every step = %.3f, time = %.2f" % (total_iters - epoch*len(data),len(data), loss, epoch_loss, time.time() - start_time))
             # writer.add_scalar("train/loss", loss, total_iters)
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
-            scaler.step(optimizer)
-            if args.stereo:
-                previous_scale = scaler.get_scale()
-                scaler.update()
-                # Preserve the original optimizer/scheduler, but do not advance LR
-                # when AMP has skipped a stereo optimizer update.
-                if scaler.get_scale() >= previous_scale:
-                    if adaptive_batch:
-                        # 按处理样本数推进原曲线，batch减半时每次更新推进半步。
-                        ratio = opts.batch_size / scheduler.reference_batch_size
-                        scheduler.step(min(scheduler.last_epoch + ratio, scheduler.total_steps - 1))
-                    else:
-                        scheduler.step()
-                    optimizer_updates += 1
-            else:
-                scheduler.step()
-                scaler.update()
+            is_last_micro = (step + 1 == len(dbloader)) or (args.max_train_steps is not None and usable_batches >= args.max_train_steps)
+            scaler.scale(loss / grad_accum).backward()
+            accum_count += 1
+            if accum_count >= grad_accum or is_last_micro:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+                scaler.step(optimizer)
+                if args.stereo:
+                    previous_scale = scaler.get_scale()
+                    scaler.update()
+                    if scaler.get_scale() >= previous_scale:
+                        if adaptive_batch:
+                            ratio = (opts.batch_size * grad_accum) / scheduler.reference_batch_size
+                            scheduler.step(min(scheduler.last_epoch + ratio, scheduler.total_steps - 1))
+                        else:
+                            scheduler.step()
+                        optimizer_updates += 1
+                else:
+                    scheduler.step()
+                    scaler.update()
+                accum_count = 0
 
             total_iters += 1
             if args.stereo:
@@ -752,6 +873,9 @@ def train(epoch_total, load_state):
             with open(osp.join(opts.model_dir, 'epochs.jsonl'), 'a') as handle:
                 handle.write(json.dumps(summary) + '\n')
             LOG_INFO('Epoch %d complete: %.1f s, checkpoint %s' % (epoch + 1, summary['epoch_seconds'], savefilename))
+        if args.stop_after_epoch is not None and (epoch + 1) >= args.stop_after_epoch:
+            LOG_INFO('Reached --stop_after_epoch %d; exiting cleanly.' % args.stop_after_epoch)
+            break
         if stop_training:
             break
 
