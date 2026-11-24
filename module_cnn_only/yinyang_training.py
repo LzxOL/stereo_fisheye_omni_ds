@@ -30,7 +30,8 @@ def sampling_quality(patch):
 
 class YinYangTrainingGeometry(nn.Module):
     def __init__(self, package, factor=2, *, reproj_mode='bilinear', bilateral_tau=2.0,
-                 overlap_mode='q_soft', disagree_delta=3.0, disagree_gamma=0.8, disagree_beta_max=4.0):
+                 overlap_mode='q_soft', disagree_delta=3.0, disagree_gamma=0.8, disagree_beta_max=4.0,
+                 use_entropy_overlap=False):
         super().__init__()
         if reproj_mode not in REPROJ_MODES:
             raise ValueError(f'Unknown reproj_mode: {reproj_mode!r}; expected one of {REPROJ_MODES}')
@@ -45,10 +46,14 @@ class YinYangTrainingGeometry(nn.Module):
         self.disagree_delta = float(disagree_delta)
         self.disagree_gamma = float(disagree_gamma)
         self.disagree_beta_max = float(disagree_beta_max)
+        self.use_entropy_overlap = bool(use_entropy_overlap)
         if overlap_mode == 'confidence_disagree':
             # softplus(raw) 初始为 1.0，对应离线已验证的 Q / (1 + spread) 几何先验。
             init_raw = math.log(math.e - 1.0)
             self.spread_raw = nn.Parameter(torch.tensor(init_raw, dtype=torch.float32))
+            if self.use_entropy_overlap:
+                # M3: softplus(-3.0) ~= 0.0486, gentle non-negative cold-start for -w_ent * H_1.
+                self.ent_raw = nn.Parameter(torch.tensor(-3.0, dtype=torch.float32))
         self.shapes = {name: getattr(package, name).shape for name in ('yin', 'yang')}
         self.output_size = package.reference['left_valid'].shape
         for name, source in [('yin', 'yang'), ('yang', 'yin')]:
@@ -166,6 +171,33 @@ class YinYangTrainingGeometry(nn.Module):
                 conf = (corner_w[None] * c_vals).sum(dim=1, keepdim=True).masked_fill(~valid, 0.0)
             return sampled, valid, spread, conf
 
+    def _project_scalar(self, name, scalar_map, support, valid):
+        """Bilinearly project a detached [B,1,2H,2W] scalar map (e.g. H_1) to [B,1,Ho,Wo]."""
+        with torch.no_grad(), torch.autocast(device_type=scalar_map.device.type, enabled=False):
+            b = scalar_map.shape[0]
+            corner_idx = getattr(self, name + '_corner_idx')
+            corner_w = getattr(self, name + '_corner_w')
+            ho, wo = getattr(self, name + '_output_window').shape
+            idx_flat = corner_idx.reshape(1, -1).expand(b, -1)
+            clean = scalar_map.float().masked_fill(~support.bool(), 0.0)
+            vals = clean[:, 0].reshape(b, -1).gather(1, idx_flat).reshape(b, 4, ho, wo)
+            return (corner_w[None] * vals).sum(dim=1, keepdim=True).masked_fill(~valid, 0.0)
+
+    def project_init(self, result):
+        """M1: Project differentiable GEV initial depth d_0 for Yin & Yang onto left_fisheye."""
+        init_preds, init_valid = {}, {}
+        for name in ('yin', 'yang'):
+            row = result[name]
+            d0_2x = row.get('init_pred_2x')
+            if d0_2x is None:
+                continue
+            q = getattr(self, name + '_output_quality')
+            d_proj, v_proj, _, _ = self._project_chart(name, d0_2x, row['valid'])
+            eff = v_proj & (q > 0)
+            init_preds[name] = d_proj.masked_fill(~eff, 0.0)
+            init_valid[name] = eff
+        return init_preds, init_valid
+
     def project(self, result, *, return_branches=False):
         """每轮[B,1,2Hchart,2Wchart]→[B,1,Hleft,Wleft]；严格检查插值邻点。
 
@@ -179,6 +211,9 @@ class YinYangTrainingGeometry(nn.Module):
         q_yang = self.yang_output_quality
         n_iters = len(result['yin']['predictions'])
         v_yin_cached, v_yang_cached = None, None
+        h1_yin, h1_yang = None, None
+        ent_yin_src = result['yin'].get('entropy_map')
+        ent_yang_src = result['yang'].get('entropy_map')
         for iteration in range(n_iters):
             confs_yin = result['yin'].get('conf_logits')
             confs_yang = result['yang'].get('conf_logits')
@@ -193,6 +228,9 @@ class YinYangTrainingGeometry(nn.Module):
                 cached_valid=v_yang_cached,
             )
             v_yin_cached, v_yang_cached = v_yin, v_yang
+            if iteration == 0 and self.use_entropy_overlap and ent_yin_src is not None and ent_yang_src is not None:
+                h1_yin = self._project_scalar('yin', ent_yin_src, result['yin']['valid'], v_yin)
+                h1_yang = self._project_scalar('yang', ent_yang_src, result['yang']['valid'], v_yang)
             eff_yin = v_yin & (q_yin > 0)
             eff_yang = v_yang & (q_yang > 0)
             both = eff_yin & eff_yang
@@ -218,6 +256,10 @@ class YinYangTrainingGeometry(nn.Module):
                     sw = F.softplus(self.spread_raw)
                     s_yin = torch.log(q_yin.clamp_min(1e-6)) - sw * torch.log1p(sp_yin)
                     s_yang = torch.log(q_yang.clamp_min(1e-6)) - sw * torch.log1p(sp_yang)
+                    if self.use_entropy_overlap and h1_yin is not None and h1_yang is not None:
+                        w_ent = F.softplus(self.ent_raw)
+                        s_yin = s_yin - w_ent * h1_yin
+                        s_yang = s_yang - w_ent * h1_yang
                     if c_yin is not None:
                         s_yin = s_yin + c_yin
                     if c_yang is not None:

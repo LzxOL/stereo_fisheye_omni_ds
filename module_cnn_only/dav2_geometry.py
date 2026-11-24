@@ -1,15 +1,23 @@
-"""Frozen official DA-V2 ViT-B + pixel-aligned adapter with Scheme I & Scheme II.
+"""Frozen official DA-V2 ViT-B + pixel-aligned adapter with Scheme I & Scheme II (v1 / v2).
 
 Only intermediate ViT tokens are used (blocks [2, 5, 8, 11]); no DPT depth head
 or online scale fitting is added.
 - Scheme I (yinyang_rot3): Unwarp left fisheye RGB onto low-distortion Yin and
   90-deg CW gravity-aligned Yang charts before running frozen ViT-B, then
   rotate Yang tokens back to native chart coordinates.
-- Scheme II (EntropyGatedGeometryContextFusion): Compute GEV matching entropy
-  H_gev from the fused stereo cost volume and gate DA-V2 residual injection so
-  confident single-peak stereo pixels stay clean while ambiguous / textureless
-  regions receive full monocular semantic context.
+- Scheme II v1 (EntropyGatedGeometryContextFusion, legacy): 3-channel [H_1, H_z, H_4]
+  gate kept intact for strict loading of 11-23 checkpoints.
+- Scheme II v2 (M1 + M2 + M3):
+  * M1: DAV2GEVGuideFusion injects F_DA into 3D GEV excitation guide +
+        compute_gev_posterior calibrates softmax posterior P, soft-argmin d_0,
+        and cross-branch consistent normalized entropy H_1 in [0, 1].
+  * M2: DecoupledEntropyGeometryFusion separates always-on semantic/edge residual
+        from monotonic bounded entropy-gated geometric completion (no gate_spatial,
+        no H_z, no entropy concatenation into context/net).
+  * M3: sample_posterior_at_depth extracts P(d_t) for iterative GRU arbitration,
+        and calibrated H_1 feeds directly into Yin/Yang overlap routing.
 """
+import math
 from pathlib import Path
 import sys
 
@@ -143,6 +151,56 @@ def compute_gev_uncertainty(gev_volume, candidate_valid):
         std = torch.sqrt(var + 1e-8)
         hz = ((h1 - mean) / std.clamp_min(1e-3)).clamp(-3.0, 3.0).masked_fill(~pix_valid, 0.0)
         return torch.cat([h1, hz, h4], dim=1)
+
+
+def compute_gev_posterior(gev_volume, candidate_valid):
+    """M1: Calibrated FP32 GEV posterior probability, soft-argmin d_0, and H_1.
+
+    Returns:
+      probs: [B, D, H, W] float32 posterior (differentiable w.r.t. gev_volume)
+      d0:    [B, 1, H, W] float32 expected candidate index in [0, D-1] (differentiable)
+      h1:    [B, 1, H, W] float32 normalized Shannon entropy in [0, 1] (detached)
+    """
+    with torch.autocast(device_type=gev_volume.device.type, enabled=False):
+        vol = gev_volume[:, 0].float() if gev_volume.ndim == 5 else gev_volume.float()  # [B, D, H, W]
+        vm = candidate_valid[:, 0].bool() if candidate_valid.ndim == 5 else candidate_valid.bool()
+        pix_valid = vm.any(dim=1, keepdim=True)  # [B, 1, H, W]
+        num_d = vol.shape[1]
+
+        # Ensure invalid-all pixels never produce NaN in softmax backward.
+        safe_logits = vol.masked_fill(~vm, -1e4)
+        all_invalid = ~pix_valid
+        safe_logits = torch.where(all_invalid, torch.zeros_like(safe_logits), safe_logits)
+        probs = F.softmax(safe_logits, dim=1)
+        probs = probs.masked_fill(~vm, 0.0)
+        probs = probs / probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
+
+        d_axis = torch.arange(num_d, device=vol.device, dtype=torch.float32).view(1, num_d, 1, 1)
+        d0 = (probs * d_axis).sum(dim=1, keepdim=True).masked_fill(~pix_valid, 0.0)
+
+        with torch.no_grad():
+            p_det = probs.detach()
+            log_cnt = vm.float().sum(dim=1, keepdim=True).clamp_min(2.0).log()
+            h1 = -(p_det * p_det.clamp_min(1e-9).log()).sum(dim=1, keepdim=True) / log_cnt
+            h1 = h1.clamp(0.0, 1.0).masked_fill(~pix_valid, 1.0)
+    return probs, d0, h1
+
+
+def sample_posterior_at_depth(probs, current_depth_idx, valid_mask=None):
+    """M3: Detached 1D linear lookup of P(d_t) in [0, 1] at continuous depth index."""
+    with torch.no_grad(), torch.autocast(device_type=probs.device.type, enabled=False):
+        p = probs.detach().float()  # [B, D, H, W]
+        num_d = p.shape[1]
+        idx = current_depth_idx.detach().float().clamp(0.0, float(num_d - 1))  # [B, 1, H, W]
+        k0 = idx.floor().long()
+        k1 = (k0 + 1).clamp(max=num_d - 1)
+        t = idx - k0.float()
+        p0 = torch.gather(p, 1, k0)
+        p1 = torch.gather(p, 1, k1)
+        p_cur = ((1.0 - t) * p0 + t * p1).clamp(0.0, 1.0)
+        if valid_mask is not None:
+            p_cur = p_cur.masked_fill(~valid_mask.bool(), 0.0)
+        return p_cur
 
 
 def vit_sampling_grid(left_cnn_grid, image_size, cnn_size, vit_size):
@@ -340,5 +398,106 @@ class EntropyGatedGeometryContextFusion(nn.Module):
                     'gate_q1_low_ent': round(float(g_val[hz_val <= q25].mean()), 4),
                     'gate_q4_high_ent': round(float(g_val[hz_val >= q75].mean()), 4),
                     'alpha': round(float(self.alpha.detach()), 4),
+                }
+        return torch.where(left_valid, enhanced, 0.)
+
+
+class DAV2GEVGuideFusion(nn.Module):
+    """M1: Lightweight residual fusion injecting Scheme I F_DA into GEV 2D guide.
+
+    guide_2d = guide_cnn + beta * phi([guide_cnn, F_DA])
+    Feeds RegularizationNet3D._excite (channel gating broadcast over D), so DA-V2
+    sharpens semantic/object boundaries for 3D cost aggregation without fabricating
+    depth-specific monocular peaks.
+    """
+    def __init__(self, channels=32):
+        super().__init__()
+        self.residual = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, 1, bias=False),
+            nn.GroupNorm(8, channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 1),
+        )
+        nn.init.normal_(self.residual[-1].weight, std=1e-3)
+        nn.init.zeros_(self.residual[-1].bias)
+        self.beta = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, guide_cnn, geometry, left_valid):
+        fused = guide_cnn + self.beta * self.residual(torch.cat([guide_cnn, geometry], dim=1))
+        return torch.where(left_valid, fused, 0.)
+
+
+class DecoupledEntropyGeometryFusion(nn.Module):
+    """M2: Semantic/Geometric decoupled context fusion with monotonic bounded gate.
+
+    F_enh = F_CNN + alpha_sem * phi_sem([F_CNN, F_DA])
+                  + alpha_geo * m(H_1) * phi_geo(F_DA)
+    where m(H_1) = sigmoid(softplus(slope_raw) * (H_1 - tau)),
+          tau = 0.25 + 0.50 * sigmoid(tau_raw) in (0.25, 0.75).
+
+    Fixes all 3 v1 pathologies:
+      1. Always-on semantic/boundary branch satisfies Q1 edge gradients (no gate pushback).
+      2. Strictly monotonic, bounded, bias-free gate m(H_1) cannot saturate or invert.
+      3. Never concatenates H_1 / H_z into MLP inputs, keeping state_proj -> net ->
+         confidence_head completely clean across Yin and Yang branches.
+    """
+    def __init__(self, channels=32):
+        super().__init__()
+        self.sem_residual = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, 1, bias=False),
+            nn.GroupNorm(8, channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 1),
+        )
+        nn.init.normal_(self.sem_residual[-1].weight, std=1e-3)
+        nn.init.zeros_(self.sem_residual[-1].bias)
+        self.alpha_sem = nn.Parameter(torch.tensor(0.1))
+
+        self.geo_residual = nn.Sequential(
+            nn.Conv2d(channels, channels, 1, bias=False),
+            nn.GroupNorm(8, channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, 1),
+        )
+        nn.init.normal_(self.geo_residual[-1].weight, std=1e-3)
+        nn.init.zeros_(self.geo_residual[-1].bias)
+        self.alpha_geo = nn.Parameter(torch.tensor(0.15))
+
+        # softplus(slope_raw) init = 4.0 > 0; tau init = 0.50 in (0.25, 0.75).
+        self.slope_raw = nn.Parameter(torch.tensor(math.log(math.exp(4.0) - 1.0), dtype=torch.float32))
+        self.tau_raw = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+        self.last_gate_stats = {}
+
+    def forward(self, cnn_reference, geometry, left_valid, h1_entropy):
+        with torch.autocast(device_type=cnn_reference.device.type, enabled=False):
+            h1_f = h1_entropy.detach().float()
+            k = F.softplus(self.slope_raw.float())
+            tau = 0.25 + 0.50 * torch.sigmoid(self.tau_raw.float())
+            m_f = torch.sigmoid(k * (h1_f - tau))
+        m = m_f.to(cnn_reference.dtype)
+        m = torch.where(left_valid, m, 0.)
+
+        sem = self.sem_residual(torch.cat([cnn_reference, geometry], dim=1))
+        geo = self.geo_residual(geometry)
+        enhanced = cnn_reference + self.alpha_sem * sem + self.alpha_geo * m * geo
+
+        with torch.no_grad():
+            vm = left_valid[:, 0]
+            if vm.any():
+                mv = m_f[:, 0][vm]
+                hv = h1_f[:, 0][vm]
+                q25 = torch.quantile(hv, 0.25)
+                q75 = torch.quantile(hv, 0.75)
+                self.last_gate_stats = {
+                    'm_mean': round(float(mv.mean()), 4),
+                    'm_q1_low_ent': round(float(mv[hv <= q25].mean()), 4),
+                    'm_q4_high_ent': round(float(mv[hv >= q75].mean()), 4),
+                    'h1_mean': round(float(hv.mean()), 4),
+                    'h1_q1': round(float(hv[hv <= q25].mean()), 4),
+                    'h1_q4': round(float(hv[hv >= q75].mean()), 4),
+                    'k': round(float(k.detach()), 4),
+                    'tau': round(float(tau.detach()), 4),
+                    'alpha_sem': round(float(self.alpha_sem.detach()), 4),
+                    'alpha_geo': round(float(self.alpha_geo.detach()), 4),
                 }
         return torch.where(left_valid, enhanced, 0.)

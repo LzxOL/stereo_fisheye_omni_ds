@@ -1,10 +1,34 @@
-# OmniDS Dual-Fisheye Stereo — Yin–Yang + DA-V2 (`yin-yang-DA-V2-11-23`)
+# OmniDS Dual-Fisheye Stereo — Yin–Yang + DA-V2 (`yin-yang-DA-V2-11-25`)
 
-本分支保存当前最新一代 **双鱼眼 Yin–Yang + DA-V2 立体匹配网络方案（`11-23` 版本）**，在上一版本 [`yin-yang-DA-V2-11-19`](https://github.com/LzxOL/stereo_fisheye_omni_ds/tree/yin-yang-DA-V2-11-19) 的基础上，完成了 **Yin–Yang V2 架构重构、面向鱼眼球面的 3D 几何感知损失（Loss 3）**，以及 **DA-V2 单目先验融合改进（方案一 + 方案二）**。
+本分支在 [`yin-yang-DA-V2-11-23`](https://github.com/LzxOL/stereo_fisheye_omni_ds/tree/yin-yang-DA-V2-11-23) 的基础上，针对 `11-23` 旧版方案二（`EntropyGatedGeometryContextFusion`）实验暴露的三大结构性缺陷（`gate_spatial` 漏电顶死并反向、单门控混管语义边界与粗糙单目几何、以及分支内标准化 `H_z` 污染 `net → confidence_head` 导致 53% 重叠区选路准确率暴跌），完成了 **Scheme II v2（M1 + M2 + M3）** 系统化重构，并完全保留对历史 `11-19` / `11-21` / `11-23` 检查点的 `strict=True` 向后兼容。
 
 ---
 
-## 与上一版本（`yin-yang-DA-V2-11-19`）的核心差异清单
+## `11-25` 相对 `11-23` 的核心架构升级（Scheme II v2: M1 + M2 + M3）
+
+| 阶段 / 模块 | `11-23` 旧版方案二的问题 | `11-25` 新版方案二（M1 + M2 + M3） | 核心代码位置与开关 |
+| :--- | :--- | :--- | :--- |
+| **Stage 2 / 4 起点<br>M1：GEV 语义引导 + 后验校准** | 3D GEV 聚合仅用局部 CNN 引导；GEV 无概率监督导致 `H_1` 扁平、被迫引入破坏跨分支标定的 `H_z`；GRU 初始深度写死 `48.0` | ① 将方案一 `F_DA` 提取前置（不增加 ViT 计算），通过 `DAV2GEVGuideFusion` 融入 GEV `_excite` 3D 通道激励；<br>② `compute_gev_posterior` 在 FP32 下输出校准后验 $P$、软期望深度 $d_0$ 与统一绝对熵 $H_1\in[0,1]$，配 `0.3 × SmoothL1(d_0, gt)` 辅助校准监督，并用 `d_0.detach()` 初始化 GRU | `module_cnn_only/dav2_geometry.py`, `network.py`, `yinyang_training.py`, `train.py`<br>`--dav2_gev_guide --gev_init_disp --gev_init_loss_weight 0.3` |
+| **Stage 3<br>M2：语义 / 几何双通路解耦融合** | `gate_spatial` 把门控焊死在 `0.94~0.98` 且低熵反向大于高熵；单门控混管语义轮廓与粗糙单目深度；把 `H_z` 拼进残差污染 `state_proj → net` | `DecoupledEntropyGeometryFusion` 彻底移除 `gate_spatial`、`H_z` 与 `H_4`，且绝不将熵拼入特征通道：<br>$F_{\text{enh}} = F_{\text{CNN}} + \alpha_{\text{sem}}\phi_{\text{sem}}([F_{\text{CNN}}, F_{\text{DA}}]) + \alpha_{\text{geo}}m(H_1)\phi_{\text{geo}}(F_{\text{DA}})$<br>其中 $m(H_1)=\sigma(k(H_1-\tau))$，强制正斜率 $k=\text{softplus}(\tilde{k})>0$、有界阈值 $\tau\in(0.25, 0.75)$ | `module_cnn_only/dav2_geometry.py`, `network.py`, `train.py`<br>`--dav2_decoupled_fusion` |
+| **Stage 4 & Stage 5<br>M3：迭代期动态仲裁 + 重叠区校准熵选路** | GRU 每步只看局部 `±4` 切片、看不到全局峰态；53% 重叠区选路被 `H_z` 砸跌 12~18 pp 且未利用跨分支同刻度匹配锐度 | ① `MotionEncoder` 新增零初始化 `arbitration_head`：每轮读取 `[H_1, P(d_t)]` 动态缩放立体分支 (`sim+gev`) 与上下文分支 (`context`) 权重（冷启动恒等 `1.0`）；<br>② Stage 5 重叠区选路直接加入 `- w_ent * H_1`（跨 Yin/Yang 同量纲，冷启动 `w_ent ≈ 0.049`） | `module_cnn_only/network.py`, `yinyang_training.py`, `train.py`<br>`--gru_entropy_arbitration --yinyang_entropy_overlap` |
+
+### `11-25` 验证状态与快速启动（统一 `Smooth L1` 先定架构、再定 Loss）
+* **单元测试 & 兼容验证**：通过 `compute_gev_posterior` 边界/反传无 NaN、`sample_posterior_at_depth`、`DAV2GEVGuideFusion`、`DecoupledEntropyGeometryFusion` 严格单调与有界阈值、`MotionEncoder` 零初始化恒等冷启动测试；通过历史 `YY_V2 e29.pth` 与 `v3_full e8.pth` 的 `strict=True` 完整加载测试。
+* **GPU 端到端冒烟验证（`STAGE=V2_FULL`, AMP + `gradient_checkpointing`, `bs=1`）**：可训练总参数 **`1,800,626`**（较 `11-23` 仅增加 **`+5,058`**），峰值显存 **`9,011 MiB`**，前向/反传/`L_init`/评估全链路零 NaN 通过。
+
+```bash
+# 任务一：纯方案一对照基准 (V2 + 仅方案一 yinyang_rot3 + Smooth L1, 10 Epochs)
+STAGE=S1 GPU_ID=1 BATCH_SIZE=1 GRAD_ACCUM=4 STOP_AFTER_EPOCH=10 ./train_yinyang_v4_dav2.sh
+
+# 任务二：方案一 + 新方案二完整版 (M1 + M2 + M3 + Smooth L1, 10 Epochs)
+STAGE=V2_FULL GPU_ID=0 BATCH_SIZE=2 GRAD_ACCUM=2 STOP_AFTER_EPOCH=10 ./train_yinyang_v4_dav2.sh
+
+# 逐项消融预设：STAGE=M1 / STAGE=M12 / STAGE=V2_LOSS3
+```
+
+---
+
+## 历史基线说明（`yin-yang-DA-V2-11-23` 相对 `11-19` 的核心差异清单）
 
 ### 1. 架构与算法对比总表
 

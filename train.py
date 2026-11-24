@@ -12,6 +12,7 @@ from argparse import ArgumentParser
 # Torch libs
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 
@@ -66,7 +67,19 @@ parser.add_argument('--dav2_input_mode', choices=('raw_fisheye', 'yinyang_rot3')
 parser.add_argument('--dav2_chart_input_size', type=int, default=336,
                     help='Scheme I short-side resolution (multiple of 14) for unwarped Yin/Yang charts')
 parser.add_argument('--dav2_entropy_gate', action='store_true',
-                    help='Scheme II: gate DA-V2 context fusion by stereo GEV matching entropy H_gev')
+                    help='Scheme II v1 (legacy): gate DA-V2 context fusion by 3-ch [H_1, H_z, H_4]')
+parser.add_argument('--dav2_gev_guide', action='store_true',
+                    help='Scheme II v2 (M1): inject F_DA into GEV 3D UNet excitation guide')
+parser.add_argument('--gev_init_disp', action='store_true',
+                    help='Scheme II v2 (M1): initialize GRU depth from calibrated GEV soft-argmin d_0')
+parser.add_argument('--gev_init_loss_weight', type=float, default=0.0,
+                    help='Scheme II v2 (M1): auxiliary SmoothL1 loss weight calibrating GEV posterior d_0 (e.g. 0.3)')
+parser.add_argument('--dav2_decoupled_fusion', action='store_true',
+                    help='Scheme II v2 (M2): semantic/geometric decoupled fusion with monotonic bounded H_1 gate')
+parser.add_argument('--gru_entropy_arbitration', action='store_true',
+                    help='Scheme II v2 (M3): iterative [H_1, P(d_t)] stereo-vs-context modulation in MotionEncoder')
+parser.add_argument('--yinyang_entropy_overlap', action='store_true',
+                    help='Scheme II v2 (M3): cross-branch calibrated H_1 penalty in Yin/Yang overlap routing')
 parser.add_argument('--val_count', type=int, default=512, help='stereo held-out official-training frames')
 parser.add_argument('--seed', type=int, default=0, help='stereo split and training seed')
 parser.add_argument('--gt_width', type=int, help='select complete raw GT TIFF width when multiple versions exist')
@@ -241,9 +254,18 @@ if args.use_dav2_geometry:
         parser.error('--use_dav2_geometry requires --stereo and dav2_input_size/dav2_chart_input_size>=14')
     if args.dav2_input_mode == 'yinyang_rot3' and not args.use_yinyang:
         parser.error('--dav2_input_mode yinyang_rot3 requires --use_yinyang')
+    if args.dav2_entropy_gate and args.dav2_decoupled_fusion:
+        parser.error('Cannot combine legacy --dav2_entropy_gate with M2 --dav2_decoupled_fusion')
     from module_cnn_only.dav2_geometry import prepare_dav2_rgb, prepare_dav2_raw_tensor
-elif args.dav2_input_mode != 'raw_fisheye' or args.dav2_entropy_gate:
-    parser.error('--dav2_input_mode and --dav2_entropy_gate require --use_dav2_geometry')
+elif (args.dav2_input_mode != 'raw_fisheye' or args.dav2_entropy_gate
+      or args.dav2_gev_guide or args.dav2_decoupled_fusion):
+    parser.error('DA-V2 mode/guide/fusion flags require --use_dav2_geometry')
+if args.gev_init_loss_weight < 0:
+    parser.error('--gev_init_loss_weight must be >= 0')
+if args.yinyang_entropy_overlap and (not args.use_yinyang or args.yinyang_overlap_mode != 'confidence_disagree'):
+    parser.error('--yinyang_entropy_overlap requires --use_yinyang --yinyang_overlap_mode confidence_disagree')
+if args.gev_init_loss_weight > 0 and not args.use_yinyang:
+    parser.error('--gev_init_loss_weight currently requires --use_yinyang')
 if args.use_yinyang and (not args.stereo or args.reference_grid != 'left_fisheye' or not args.yinyang_cache):
     parser.error('--use_yinyang requires --stereo --reference_grid left_fisheye --yinyang_cache PREFIX')
 if args.mesh_gt_root and (not args.stereo or args.reference_grid != 'left_fisheye'):
@@ -310,6 +332,10 @@ if args.stereo:
     opts.net_opts.yinyang_disagree_delta = args.yinyang_disagree_delta
     opts.net_opts.yinyang_disagree_gamma = args.yinyang_disagree_gamma
     opts.net_opts.yinyang_disagree_beta_max = args.yinyang_disagree_beta_max
+    opts.net_opts.yinyang_entropy_overlap = args.yinyang_entropy_overlap
+    opts.net_opts.gev_init_disp = args.gev_init_disp
+    opts.net_opts.gev_init_loss_weight = args.gev_init_loss_weight
+    opts.net_opts.gru_entropy_arbitration = args.gru_entropy_arbitration
     opts.net_opts.training_geometry = args.use_yinyang
     opts.net_opts.yinyang_output = 'left_fisheye' if args.use_yinyang else 'native'
     opts.net_opts.gradient_checkpointing = args.gradient_checkpointing
@@ -321,6 +347,8 @@ if args.stereo:
         opts.net_opts.dav2_input_mode = args.dav2_input_mode
         opts.net_opts.dav2_chart_input_size = args.dav2_chart_input_size
         opts.net_opts.dav2_entropy_gate = args.dav2_entropy_gate
+        opts.net_opts.dav2_gev_guide = args.dav2_gev_guide
+        opts.net_opts.dav2_decoupled_fusion = args.dav2_decoupled_fusion
 # ERP / cross-attention
 opts.net_opts.equi_h = args.equirect_size[0]
 opts.net_opts.equi_w = args.equirect_size[1]
@@ -461,8 +489,12 @@ def train(epoch_total, load_state):
                  (args.fisheye_aniso_alpha, args.fisheye_epi_weight, args.fisheye_normal_weight,
                   args.fisheye_normal_last_iters, args.fisheye_edge_alpha, grad_accum))
     if args.use_dav2_geometry:
-        LOG_INFO('DA-V2: frozen ViT-B blocks [2,5,8,11], input_mode=%s (chart_size=%d), entropy_gate=%s' %
-                 (args.dav2_input_mode, args.dav2_chart_input_size, args.dav2_entropy_gate))
+        LOG_INFO('DA-V2: frozen ViT-B blocks [2,5,8,11], input_mode=%s (chart_size=%d), '
+                 'legacy_ent_gate=%s | v2(M1: gev_guide=%s init_disp=%s init_loss=%.2f | '
+                 'M2: decoupled=%s | M3: gru_arb=%s ent_overlap=%s)' %
+                 (args.dav2_input_mode, args.dav2_chart_input_size, args.dav2_entropy_gate,
+                  args.dav2_gev_guide, args.gev_init_disp, args.gev_init_loss_weight,
+                  args.dav2_decoupled_fusion, args.gru_entropy_arbitration, args.yinyang_entropy_overlap))
     if opts.net_opts.fix_bn:
         net.module.freeze_bn()
     LOG_INFO("Parameter Count: %d" % count_parameters(net))
@@ -499,8 +531,11 @@ def train(epoch_total, load_state):
                 for key, default in (('use_group_variance', False), ('use_yinyang', False), ('use_rgb', False),
                                      ('use_shallow_skip', False), ('use_geometry_refiner', True),
                                      ('yinyang_reproj_mode', 'bilinear'), ('yinyang_overlap_mode', 'q_soft'),
+                                     ('yinyang_entropy_overlap', False),
                                      ('dav2_input_mode', 'raw_fisheye'), ('dav2_chart_input_size', 336),
-                                     ('dav2_entropy_gate', False)):
+                                     ('dav2_entropy_gate', False), ('dav2_gev_guide', False),
+                                     ('gev_init_disp', False), ('dav2_decoupled_fusion', False),
+                                     ('gru_entropy_arbitration', False)):
                     if snapshot['net_opts'].get(key, default) != opts.net_opts.get(key, default):
                         raise ValueError(f'Restore checkpoint {key} differs; pass the matching ablation switch')
                 if snapshot['net_opts'].get('use_dav2_geometry', False) != args.use_dav2_geometry:
@@ -663,6 +698,18 @@ def train(epoch_total, load_state):
                                 net.module.branch_predictions[branch_name], gt.unsqueeze(1), b_valid.unsqueeze(1)
                             )
                         loss = loss + args.yinyang_aux_weight * b_loss
+            if (args.use_yinyang and args.gev_init_loss_weight > 0
+                    and net.module.init_branch_predictions is not None):
+                init_losses = []
+                for branch_name in ('yin', 'yang'):
+                    if branch_name not in net.module.init_branch_predictions:
+                        continue
+                    b_valid = raw_gt_valid & net.module.init_branch_valid[branch_name][:, 0]
+                    if b_valid.any():
+                        d0_pred = net.module.init_branch_predictions[branch_name][:, 0]
+                        init_losses.append(F.smooth_l1_loss(d0_pred[b_valid], gt[b_valid], beta=1.0))
+                if init_losses:
+                    loss = loss + args.gev_init_loss_weight * (sum(init_losses) / len(init_losses))
             
             train_loss += loss.data
             usable_batches += 1
